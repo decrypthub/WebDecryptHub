@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Icon, LogoMark } from './components.jsx';
+import { Icon, LogoMark, askConfirm } from './components.jsx';
 import { native } from './transport.js';
 import { checkForUpdate, installAndRelaunch } from './updater.js';
 
@@ -87,7 +87,7 @@ function KernelBlock({ s, up, toast }) {
     if (r.ok) { up('kernel', 'bundled'); toast?.(`内置 Chromium ${r.version} 已就绪`, 'ok'); } else setErr(r.error);
   }
   async function del() {
-    if (!window.confirm('删除已下载的内置 Chromium？使用它的浏览器会被关闭。')) return;
+    if (!await askConfirm('删除已下载的内置 Chromium？使用它的浏览器会被关闭。', { ok: '删除', danger: true })) return;
     await window.api.invoke('kernel-delete'); if (k === 'bundled') up('kernel', 'system'); refresh();
   }
   const pct = dl && dl.total ? Math.round(dl.got / dl.total * 100) : null;

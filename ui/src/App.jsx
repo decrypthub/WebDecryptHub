@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback, useReducer } from 'react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
-import { Icon, EmptyState, useToasts, Markdown, LogoMark } from './components.jsx';
+import { Icon, EmptyState, useToasts, Markdown, LogoMark, askConfirm } from './components.jsx';
 import { SettingsPane, FirstRun, WindowChips } from './forms.jsx';
 import { onConnState, native } from './transport.js';
 import { TitleBar } from './titlebar.jsx';
@@ -202,7 +202,7 @@ export default function App() {
   }
   async function closeSession(id) {
     const s = sessions.sessions.find(x => x.id === id);
-    if (s?.agentRunning && !window.confirm(`「${s.title}」的 AI 正在分析，关闭将中断并关闭其浏览器。继续？`)) return;
+    if (s?.agentRunning && !await askConfirm(`「${s.title}」的 AI 正在分析，关闭将中断并关闭其浏览器。继续？`, { ok: '关闭', danger: true })) return;
     await api.invoke('session-close', { sessionId: id }); dispatch({ t: 'drop', sid: id }); localStorage.removeItem('wdh_ev_' + id); seen.current.delete(id);
   }
   function sendInput(e, kind, extra = {}) {
@@ -236,7 +236,7 @@ export default function App() {
   }
   async function cleanRetry(e) {
     const fresh = !!e?.shiftKey;
-    if (!window.confirm(fresh ? '以全新隔离 Profile 重启该会话的浏览器并重新分析？' : '清除当前站点 Cookie/存储与已捕获请求，刷新后重新分析？（Shift+点击：全新隔离 Profile）')) return;
+    if (!await askConfirm(fresh ? '以全新隔离 Profile 重启该会话的浏览器并重新分析？' : '清除当前站点 Cookie/存储与已捕获请求，刷新后重新分析？（Shift+点击：全新隔离 Profile）')) return;
     try {
       if (cur.agentRunning) await inv('agent-interrupt');
       if (fresh) await inv('restart-fresh', { url: cur.url }); else await inv('reset-session', { scope: 'site', reload: true });

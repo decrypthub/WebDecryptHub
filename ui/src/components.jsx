@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { createRoot } from 'react-dom/client';
 import { renderMd, highlightHtml } from './md.js';
 
 export function Icon({ n, size = 16, className }) {
@@ -76,4 +77,21 @@ export function Markdown({ text }) {
 // WebDecryptHub 品牌标（取自 ios.decrypthub.com 的渡鸦图标）
 export function LogoMark({ size = 26, className = 'mark' }) {
   return <img className={className} src="./logo.svg" width={size} height={size} alt="WebDecryptHub" draggable={false} />;
+}
+
+// 应用内确认框：WebKitGTK/WebView2 下 window.confirm 不可靠（Linux 上不阻塞、直接返回 true），统一用 Promise 版本
+export function askConfirm(message, { ok = '确定', danger = false } = {}) {
+  return new Promise(resolve => {
+    const el = document.createElement('div'); document.body.appendChild(el);
+    const root = createRoot(el);
+    const done = v => { root.unmount(); el.remove(); resolve(v); };
+    function Dlg() {
+      useEffect(() => { const h = e => { if (e.key === 'Escape') done(false); if (e.key === 'Enter') done(true); }; window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h); }, []);
+      return <div className="overlay confirm-ov" onMouseDown={e => { if (e.target === e.currentTarget) done(false); }}>
+        <div className="modal confirm"><div className="confirm-b">{message}</div>
+          <div className="confirm-f"><button className="btn btn-sm" onClick={() => done(false)}>取消</button><button className={(danger ? 'btn-danger' : 'btn-primary') + ' btn-sm'} autoFocus onClick={() => done(true)}>{ok}</button></div></div>
+      </div>;
+    }
+    root.render(<Dlg />);
+  });
 }

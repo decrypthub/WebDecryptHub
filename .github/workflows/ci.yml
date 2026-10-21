@@ -29,7 +29,7 @@ jobs:
       - name: Linux WebKit deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libx11-dev libxi-dev
 
       - name: UI npm ci + build
         run: |
@@ -40,9 +40,44 @@ jobs:
         working-directory: sidecar
         run: npm ci --ignore-scripts
 
+      - name: Sidecar unit tests
+        working-directory: sidecar
+        run: node --test test/
+
       - name: Sidecar bun compile (linux)
         run: bun scripts/build-sidecar.mjs linux
 
       - name: cargo check
         working-directory: src-tauri
         run: cargo check
+
+      - name: cargo test (embed geometry)
+        working-directory: src-tauri
+        run: cargo test --bins
+
+  # Windows 原生嵌入（windows crate / Win32 SetParent）在 Linux 上无法编译，单独在 Windows 上检查
+  check-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: UI build
+        shell: bash
+        run: |
+          npm ci
+          npm run build:ui
+      - name: cargo check
+        working-directory: src-tauri
+        shell: bash
+        run: |
+          # tauri.windows.conf.json 的 resources 需存在才能通过 tauri-build 检查，这里放占位文件
+          mkdir -p ../build/resources/patchright-core ../build/resources/node
+          touch ../build/jsra-sidecar.exe ../build/resources/patchright-core/.keep ../build/resources/node/.keep
+          cargo check

@@ -110,6 +110,7 @@ pub fn hide_all() { with(|st| { st.visible = false; apply(st); }); }
 /// 会话浏览器关闭：销毁宿主
 pub fn release(sid: &str) { with(|st| { if let Some(e) = st.entries.remove(sid) { imp::destroy_host(e.host); } }); }
 /// 定时：收养新弹出的 Chrome 窗口、清理已关闭窗口、保持几何（主线程调用）
+pub static REMAPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 pub fn tick() {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -118,6 +119,15 @@ pub fn tick() {
         let mut changed = false;
         for id in &ids { let n = st.entries[id].wins.len(); adopt_new(st, id); if st.entries[id].wins.len() != n { changed = true; } }
         if changed { apply(st); }
+        // 看门狗：收养时我们 unmap 了 WM 管理中的 Chrome 窗口，WM 会异步“撤销管理”（ICCCM withdraw：
+        // 把窗口 reparent 回根窗口并/或 unmap）。若这一步晚于我们的 XReparentWindow，结果是 Chrome 留在宿主里但未映射（黑屏），
+        // 或被挪回根窗口盖在应用上。每 ~150ms 检查一次，未映射则重新映射并放回原位。
+        if n % 5 == 0 && st.visible {
+            if let Some(e) = st.focused.as_deref().and_then(|f| st.entries.get(f)) {
+                let cr = chrome_rect(st.rect, st.inset, st.dpr);
+                for w in &e.wins { if imp::ensure_embedded(e.host, *w) { imp::place(*w, cr); imp::raise(*w); REMAPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); eprintln!("[embed] re-embedded 0x{:x}", w); } }
+            }
+        }
         imp::focus_follow(st.entries.get(st.focused.as_deref().unwrap_or("")).filter(|_| st.visible).map(|e| (e.host, e.wins.clone())));
     });
 }
@@ -181,6 +191,7 @@ mod imp {
     }
     pub fn raise(v: u64) { unsafe { let _ = SetWindowPos(h(v), Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS); } }
     pub fn set_visible(v: u64, on: bool) { unsafe { let _ = ShowWindow(h(v), if on { SW_SHOWNA } else { SW_HIDE }); } }
+    pub fn ensure_embedded(host: u64, v: u64) -> bool { unsafe { if GetParent(h(v)).ok() != Some(h(host)) { let _ = adopt(host, v); return true; } if IsWindowVisible(h(v)).as_bool() { false } else { let _ = ShowWindow(h(v), SW_SHOWNA); true } } }
     pub fn focus_follow(_cur: Option<(u64, Vec<u64>)>) {} // Win32 子窗口点击即获得焦点（SetParent 后输入队列已关联）
 }
 
@@ -191,7 +202,7 @@ mod imp {
     use std::os::raw::{c_int, c_uchar, c_uint, c_ulong};
     use x11_dl::xlib;
 
-    struct X { xl: xlib::Xlib, d: *mut xlib::Display, pid_atom: c_ulong }
+    struct X { xl: xlib::Xlib, d: *mut xlib::Display, pid_atom: c_ulong, _xi: Option<x11_dl::xinput2::XInput2> }
     thread_local! { static XC: std::cell::RefCell<Option<X>> = const { std::cell::RefCell::new(None) }; }
     unsafe extern "C" fn quiet(_: *mut xlib::Display, _: *mut xlib::XErrorEvent) -> c_int { 0 }
 
@@ -204,7 +215,18 @@ mod imp {
                 let d = unsafe { (xl.XOpenDisplay)(std::ptr::null()) };
                 if d.is_null() { return R::default(); }
                 let pid_atom = unsafe { (xl.XInternAtom)(d, c"_NET_WM_PID".as_ptr(), 0) };
-                *c = Some(X { xl, d, pid_atom });
+                // XInput2 原始按键事件：任何客户端都可订阅，不受 Chrome 已占用 ButtonPress 的限制；用于可靠的点击聚焦
+                let xi = x11_dl::xinput2::XInput2::open().ok().filter(|xi| unsafe {
+                    let (mut op, mut ev, mut er) = (0, 0, 0);
+                    if (xl.XQueryExtension)(d, c"XInputExtension".as_ptr(), &mut op, &mut ev, &mut er) == 0 { return false; }
+                    let (mut ma, mut mi) = (2, 0);
+                    if (xi.XIQueryVersion)(d, &mut ma, &mut mi) != 0 { return false; }
+                    let mut bits = [0u8; 4];
+                    bits[(x11_dl::xinput2::XI_RawButtonPress >> 3) as usize] |= 1 << (x11_dl::xinput2::XI_RawButtonPress & 7);
+                    let mut m = x11_dl::xinput2::XIEventMask { deviceid: x11_dl::xinput2::XIAllMasterDevices, mask_len: 4, mask: bits.as_mut_ptr() };
+                    (xi.XISelectEvents)(d, (xl.XDefaultRootWindow)(d), &mut m, 1) == 0
+                });
+                *c = Some(X { xl, d, pid_atom, _xi: xi });
             }
             let xx = c.as_ref().unwrap();
             unsafe {
@@ -253,6 +275,9 @@ mod imp {
                     let mut a: xlib::XWindowAttributes = std::mem::zeroed();
                     if (xx.xl.XGetWindowAttributes)(xx.d, w, &mut a) == 0 { continue; }
                     if a.override_redirect != 0 || a.width < 150 || a.height < 100 || a.class != xlib::InputOutput { continue; }
+                    // 只收养 Chrome 已映射（已首帧/已被 WM 管理）的窗口：Chrome 启动时会创建同 PID 的隐藏辅助窗口，
+                    // 收养它会把空白窗口叠在页面上；过早收养真正的窗口也会与 WM 的首次管理竞争
+                    if a.map_state != xlib::IsViewable { continue; }
                     out.push(w as u64);
                 }
             }
@@ -269,6 +294,18 @@ mod imp {
         });
         Ok(())
     }
+    pub fn ensure_embedded(host: u64, v: u64) -> bool {
+        x(|xx| unsafe {
+            let mut a: xlib::XWindowAttributes = std::mem::zeroed();
+            if (xx.xl.XGetWindowAttributes)(xx.d, v as c_ulong, &mut a) == 0 { return false; }
+            let (mut root, mut par, mut kids, mut n) = (0, 0, std::ptr::null_mut(), 0 as c_uint);
+            if (xx.xl.XQueryTree)(xx.d, v as c_ulong, &mut root, &mut par, &mut kids, &mut n) == 0 { return false; }
+            if !kids.is_null() { (xx.xl.XFree)(kids as *mut _); }
+            if par != host as c_ulong { (xx.xl.XReparentWindow)(xx.d, v as c_ulong, host as c_ulong, 0, 0); (xx.xl.XMapWindow)(xx.d, v as c_ulong); return true; }
+            if a.map_state == xlib::IsUnmapped { (xx.xl.XMapWindow)(xx.d, v as c_ulong); return true; }
+            false
+        })
+    }
     pub fn place(v: u64, r: PxRect) { x(|xx| unsafe { (xx.xl.XMoveResizeWindow)(xx.d, v as c_ulong, r.x, r.y, r.w.max(1) as c_uint, r.h.max(1) as c_uint); }) }
     pub fn raise(v: u64) { x(|xx| unsafe { (xx.xl.XRaiseWindow)(xx.d, v as c_ulong); }) }
     pub fn set_visible(v: u64, on: bool) { x(|xx| unsafe { if on { (xx.xl.XMapRaised)(xx.d, v as c_ulong); } else { (xx.xl.XUnmapWindow)(xx.d, v as c_ulong); } }) }
@@ -279,12 +316,16 @@ mod imp {
         x(|xx| unsafe {
             let (mut r, mut c, mut rx, mut ry, mut wx, mut wy, mut m) = (0, 0, 0, 0, 0, 0, 0 as c_uint);
             if (xx.xl.XQueryPointer)(xx.d, host as c_ulong, &mut r, &mut c, &mut rx, &mut ry, &mut wx, &mut wy, &mut m) == 0 { return; }
-            if m & (xlib::Button1Mask | xlib::Button3Mask) == 0 { return; }
+            // 期间是否有过按键（快速点击可能在两次轮询之间按下又松开）
+            let mut pressed = false;
+            while (xx.xl.XPending)(xx.d) > 0 { let mut ev: xlib::XEvent = std::mem::zeroed(); (xx.xl.XNextEvent)(xx.d, &mut ev); if ev.get_type() == xlib::GenericEvent { pressed = true; } }
+            if pressed && std::env::var_os("JSRA_EMBED_DEBUG").is_some() { eprintln!("[embed] raw press"); }
+            if !pressed && m & (xlib::Button1Mask | xlib::Button3Mask) == 0 { return; }
             let mut a: xlib::XWindowAttributes = std::mem::zeroed();
             if (xx.xl.XGetWindowAttributes)(xx.d, host as c_ulong, &mut a) == 0 || a.map_state != xlib::IsViewable { return; }
             let inside = wx >= 0 && wy >= 0 && wx < a.width && wy < a.height;
             let (mut fw, mut rv) = (0, 0); (xx.xl.XGetInputFocus)(xx.d, &mut fw, &mut rv);
-            if inside && fw != top as c_ulong { (xx.xl.XSetInputFocus)(xx.d, top as c_ulong, xlib::RevertToParent, xlib::CurrentTime); }
+            if inside && fw != top as c_ulong { if std::env::var_os("JSRA_EMBED_DEBUG").is_some() { eprintln!("[embed] focus -> 0x{:x} (was 0x{:x}, raw={})", top, fw, pressed); } (xx.xl.XSetInputFocus)(xx.d, top as c_ulong, xlib::RevertToParent, xlib::CurrentTime); }
             else if !inside && fw == top as c_ulong {
                 // 点到应用其它区域：焦点还给主窗口（宿主的父窗口）
                 let (mut root, mut par, mut kids, mut n) = (0, 0, std::ptr::null_mut(), 0 as c_uint);
@@ -305,6 +346,7 @@ mod imp {
     pub fn destroy_host(_: u64) {}
     pub fn find_top_windows(_: u32) -> Vec<u64> { vec![] }
     pub fn adopt(_: u64, _: u64) -> Result<(), String> { Err("unsupported".into()) }
+    pub fn ensure_embedded(_: u64, _: u64) -> bool { false }
     pub fn place(_: u64, _: PxRect) {}
     pub fn raise(_: u64) {}
     pub fn set_visible(_: u64, _: bool) {}

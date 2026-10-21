@@ -136,9 +136,12 @@ jobs:
           fname = os.environ["UPD_BASENAME"]
           base = os.environ["BASE"]
           sig = os.environ["SIGTEXT"]
+          notes_file = pathlib.Path(f"docs/release-notes/{ver}.md")
+          notes = notes_file.read_text(encoding="utf-8").strip() if notes_file.exists() else f"WebDecryptHub {ver}"
+          pathlib.Path("dist/RELEASE_NOTES.md").write_text(notes + "\n", encoding="utf-8")
           doc = {
             "version": ver,
-            "notes": f"WebDecryptHub {ver}",
+            "notes": notes,
             "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "platforms": {
               "windows-x86_64": {"signature": sig, "url": f"{base}/{fname}"},
@@ -161,6 +164,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
+          body_path: dist/RELEASE_NOTES.md
           generate_release_notes: true
           files: |
             dist/WebDecryptHub-*-win-x64-setup.exe
