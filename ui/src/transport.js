@@ -8,7 +8,7 @@ export const native = {
   isNative,
   async appInfo() {
     if (isNative()) { try { return await tauriInvoke('app_info'); } catch {} }
-    return { name: 'WebDecryptHub', version: '1.2.0 (web)', os: 'web', arch: '-', keyringBackend: '浏览器本地存储(开发)' };
+    return { name: 'WebDecryptHub', version: '1.2.1 (web)', os: 'web', arch: '-', keyringBackend: '浏览器本地存储(开发)' };
   },
   async secretGet() {
     // 系统凭据库不可用（如 Linux 无 Secret Service）时回落到本地存储，避免重启后丢失密钥

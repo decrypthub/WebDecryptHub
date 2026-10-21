@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "../build/jsra-sidecar-linux": "jsra-sidecar-linux"
+    }
+  }
+}

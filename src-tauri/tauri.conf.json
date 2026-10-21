@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "WebDecryptHub",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "identifier": "com.webdecrypthub.app",
   "build": {
     "frontendDist": "../ui-dist"
@@ -22,12 +22,16 @@
       "icons/icon.ico",
       "icons/icon.png"
     ],
-    "resources": {
-      "../build/jsra-sidecar.exe": "jsra-sidecar.exe",
-      "../build/jsra-sidecar-linux": "jsra-sidecar-linux"
-    },
     "linux": {},
-    "windows": {},
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
     "createUpdaterArtifacts": true
   },
   "plugins": {
@@ -40,5 +44,6 @@
         "installMode": "passive"
       }
     }
-  }
+  },
+  "mainBinaryName": "WebDecryptHub"
 }

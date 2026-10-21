@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "resources": {
+      "../build/jsra-sidecar.exe": "jsra-sidecar.exe",
+      "../build/resources/patchright-core/": "resources/patchright-core/",
+      "../build/resources/node/": "resources/node/"
+    }
+  }
+}

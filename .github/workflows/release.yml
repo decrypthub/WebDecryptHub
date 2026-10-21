@@ -13,10 +13,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: npm
@@ -41,25 +41,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # isolated-vm ships prebuilds; full native rebuild often fails on CI Node ABIs
+          # isolated-vm ships prebuilds; a native rebuild often fails on CI Node ABIs
           (cd sidecar && npm ci --ignore-scripts)
           bun scripts/build-sidecar.mjs win
-          test -f build/jsra-sidecar.exe
-          # tauri.conf.json lists both platform sidecars as resources — stub the unused one
-          if [ ! -f build/jsra-sidecar-linux ]; then
-            printf 'stub\n' > build/jsra-sidecar-linux
-          fi
+          # Must be the real bun-compiled sidecar, not a stub
+          SIZE=$(stat -c %s build/jsra-sidecar.exe)
+          echo "jsra-sidecar.exe size=$SIZE"
+          test "$SIZE" -gt 50000000
+          test -f build/resources/patchright-core/package.json
 
-      - name: Bundle Node win-x64 into resources
+      - name: Bundle Node win-x64 (+npm) into build/resources/node
         shell: bash
         run: |
           set -euo pipefail
           NODE_VER=v20.18.1
-          curl -fsSL "https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-win-x64.zip" -o node.zip
-          powershell -Command "Expand-Archive -Path node.zip -DestinationPath nodepack -Force"
-          mkdir -p src-tauri/resources/node
-          cp -a "nodepack/node-${NODE_VER}-win-x64/." src-tauri/resources/node/
-          test -f src-tauri/resources/node/node.exe
+          curl -fsSL --retry 3 "https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-win-x64.zip" -o node.zip
+          curl -fsSL --retry 3 "https://nodejs.org/dist/${NODE_VER}/SHASUMS256.txt" -o node-sums.txt
+          grep " node-${NODE_VER}-win-x64.zip\$" node-sums.txt | sed 's/ .*//' > node.sha
+          test "$(sha256sum node.zip | cut -d' ' -f1)" = "$(cat node.sha)"
+          7z x -y -onodepack node.zip > /dev/null
+          rm -rf build/resources/node
+          mkdir -p build/resources/node
+          cp -a "nodepack/node-${NODE_VER}-win-x64/." build/resources/node/
+          test -f build/resources/node/node.exe
+          test -f build/resources/node/node_modules/npm/bin/npm-cli.js
+          build/resources/node/node.exe -v
 
       - name: Tauri build (NSIS + updater artifacts)
         shell: bash
@@ -75,6 +81,19 @@ jobs:
           npm i -D @tauri-apps/cli@2
           npx tauri build --bundles nsis
 
+      - name: Verify installer payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          NSIS=$(find src-tauri/target/release/bundle/nsis -type f -name '*-setup.exe' | head -1)
+          test -n "$NSIS"
+          ls -la "$NSIS"
+          7z l "$NSIS" > payload.txt
+          for f in WebDecryptHub.exe jsra-sidecar.exe resources/node/node.exe resources/node/node_modules/npm/bin/npm-cli.js resources/patchright-core/package.json; do
+            grep -F "$(echo "$f" | tr '/' '\\')" payload.txt > /dev/null || grep -F "$f" payload.txt > /dev/null || { echo "MISSING in installer: $f" >&2; exit 1; }
+          done
+          echo "installer payload OK"
+
       - name: Package dist + latest.json
         shell: bash
         env:
@@ -84,7 +103,7 @@ jobs:
           set -euo pipefail
           VER="${GITHUB_REF_NAME#v}"
           mkdir -p dist
-          NSIS=$(find src-tauri/target/release/bundle/nsis -type f -name '*.exe' | head -1)
+          NSIS=$(find src-tauri/target/release/bundle/nsis -type f -name '*-setup.exe' | head -1)
           test -n "$NSIS"
           SETUP="WebDecryptHub-${VER}-win-x64-setup.exe"
           cp "$NSIS" "dist/${SETUP}"
@@ -138,7 +157,7 @@ jobs:
           ls -la dist
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}

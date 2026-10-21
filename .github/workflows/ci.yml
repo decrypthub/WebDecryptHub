@@ -10,10 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: npm
@@ -42,13 +42,6 @@ jobs:
 
       - name: Sidecar bun compile (linux)
         run: bun scripts/build-sidecar.mjs linux
-
-      - name: Stub Windows sidecar for resource path check
-        run: |
-          # tauri.conf.json requires both sidecar paths to exist for cargo check
-          if [ ! -f build/jsra-sidecar.exe ]; then
-            printf 'stub\n' > build/jsra-sidecar.exe
-          fi
 
       - name: cargo check
         working-directory: src-tauri
