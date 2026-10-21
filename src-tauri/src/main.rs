@@ -4,6 +4,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
 mod embed;
+mod shutdown;
 
 const KEYRING_SERVICE: &str = "com.webdecrypthub.app";
 const LEGACY_KEYRING_SERVICE: &str = "com.niying.jsra";
@@ -55,17 +56,6 @@ fn spawn_sidecar(port: &Arc<Mutex<u16>>) -> std::io::Result<Child> {
     Ok(child)
 }
 
-#[cfg(windows)]
-fn kill_tree(child: &mut Child) {
-    let pid = child.id();
-    let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output();
-    let _ = child.kill();
-}
-#[cfg(not(windows))]
-fn kill_tree(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
 
 #[tauri::command]
 fn secret_set(value: String) -> Result<(), String> {
@@ -115,6 +105,21 @@ async fn pick_save_path(app: tauri::AppHandle, default_name: String, filter_name
 #[tauri::command]
 fn get_ws_port(state: State<AppState>) -> u16 { *state.port.lock().unwrap() }
 
+/// 在线更新拉起安装器之前调用：停掉监督线程，优雅关闭 sidecar 进程树，超时后强制结束。
+#[tauri::command]
+async fn prepare_for_update(state: State<'_, AppState>) -> Result<(), String> {
+    *state.running.lock().unwrap() = false;
+    let port = *state.port.lock().unwrap();
+    let sidecar = state.sidecar.clone();
+    let install_dir = shutdown::current_install_dir();
+    tauri::async_runtime::spawn_blocking(move || {
+        shutdown::stop_sidecar_for_update(port, &sidecar, &install_dir);
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 fn app_info() -> serde_json::Value {
     serde_json::json!({
@@ -129,7 +134,7 @@ fn app_info() -> serde_json::Value {
 #[tauri::command]
 fn restart_sidecar(state: State<AppState>) -> Result<(), String> {
     let mut guard = state.sidecar.lock().unwrap();
-    if let Some(mut c) = guard.take() { kill_tree(&mut c); }
+    if let Some(mut c) = guard.take() { shutdown::kill_tree(&mut c); }
     match spawn_sidecar(&state.port) {
         Ok(c) => { *guard = Some(c); Ok(()) }
         Err(e) => Err(format!("重启逻辑进程失败: {}", e)),
@@ -168,7 +173,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(AppState { port: port.clone(), sidecar: sidecar.clone(), running: running.clone() })
-        .invoke_handler(tauri::generate_handler![secret_set, secret_get, secret_clear, get_ws_port, app_info, restart_sidecar, pick_save_path, embed_show, embed_hide, embed_release, embed_supported])
+        .invoke_handler(tauri::generate_handler![secret_set, secret_get, secret_clear, get_ws_port, app_info, restart_sidecar, prepare_for_update, pick_save_path, embed_show, embed_hide, embed_release, embed_supported])
         .setup(move |app| {
             match spawn_sidecar(&port) {
                 Ok(c) => { *sidecar.lock().unwrap() = Some(c); }
@@ -189,9 +194,16 @@ fn main() {
                         None => true,
                     };
                     if dead {
-                        // 指数退避，避免异常时疯狂重启
+                        // 指数退避，避免异常时疯狂重启。更新开始后 running 会被关掉，
+                        // 退避醒来必须再看一眼，否则会把刚停掉的 sidecar 又拉起来。
                         fails += 1;
-                        if fails > 1 { drop(g); std::thread::sleep(std::time::Duration::from_millis((500u64 << fails.min(5)).min(15000))); g = sc.lock().unwrap(); }
+                        if fails > 1 {
+                            drop(g);
+                            std::thread::sleep(std::time::Duration::from_millis((500u64 << fails.min(5)).min(15000)));
+                            if !*run.lock().unwrap() { break; }
+                            g = sc.lock().unwrap();
+                        }
+                        if !*run.lock().unwrap() { break; }
                         if let Ok(c) = spawn_sidecar(&sp) { *g = Some(c); }
                     } else if *sp.lock().unwrap() != 0 { fails = 0; }
                 }
@@ -238,7 +250,7 @@ fn main() {
                 let state: State<AppState> = window.state();
                 { *state.running.lock().unwrap() = false; }
                 let child = { state.sidecar.lock().unwrap().take() };
-                if let Some(mut c) = child { kill_tree(&mut c); }
+                if let Some(mut c) = child { shutdown::kill_tree(&mut c); }
             }
         })
         .run(tauri::generate_context!())

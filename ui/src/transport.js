@@ -8,7 +8,7 @@ export const native = {
   isNative,
   async appInfo() {
     if (isNative()) { try { return await tauriInvoke('app_info'); } catch {} }
-    return { name: 'WebDecryptHub', version: '1.3.0 (web)', os: 'web', arch: '-', keyringBackend: '浏览器本地存储(开发)' };
+    return { name: 'WebDecryptHub', version: '1.3.1 (web)', os: 'web', arch: '-', keyringBackend: '浏览器本地存储(开发)' };
   },
   async secretGet() {
     // 系统凭据库不可用（如 Linux 无 Secret Service）时回落到本地存储，避免重启后丢失密钥
@@ -24,6 +24,10 @@ export const native = {
     localStorage.removeItem('jsra_key');
   },
   async restartSidecar() { if (isNative()) { try { await tauriInvoke('restart_sidecar'); } catch {} } },
+  async prepareForUpdate() {
+    if (!isNative()) return;
+    await tauriInvoke('prepare_for_update');
+  },
   // 原生保存对话框；返回绝对路径或 null（用户取消）
   async pickSavePath(defaultName, filterName = 'HAR', ext = 'har') {
     if (isNative()) return await tauriInvoke('pick_save_path', { defaultName, filterName, ext });

@@ -165,24 +165,36 @@ function UpdateSection({ toast, info }) {
     if (!upd?.raw) return;
     setSt({ phase: 'downloading' });
     try {
-      await installAndRelaunch(upd.raw, (p) => setProg(p));
+      await installAndRelaunch(upd.raw, (p) => {
+        if (p.event === 'Installing') setSt({ phase: 'installing' });
+        setProg(p);
+      });
     } catch (e) {
       setSt({ phase: 'error', error: String(e?.message || e) });
       toast?.('更新安装失败：' + (e?.message || e), 'err');
     }
   };
+  const busy = st.phase === 'checking' || st.phase === 'downloading' || st.phase === 'installing';
   const pct = prog?.contentLength ? Math.min(100, Math.round(100 * (prog.downloaded || 0) / prog.contentLength)) : null;
   return <section><h3>软件更新</h3>
     <div className="hint">当前版本 {info?.version || '—'} · 通过 GitHub Releases 检查更新</div>
     <div className="row2" style={{ marginTop: 8, gap: 8, alignItems: 'center' }}>
-      <button className="btn btn-sm" disabled={st.phase === 'checking' || st.phase === 'downloading'} onClick={check}>
+      <button className="btn btn-sm" disabled={busy} onClick={check}>
         {st.phase === 'checking' ? '检查中…' : '检查更新'}
       </button>
       {st.phase === 'available' && <button className="btn-primary btn-sm" onClick={install}>下载并安装 {upd?.version}</button>}
-      {st.phase === 'downloading' && <span className="hint">下载中{pct != null ? ` ${pct}%` : '…'}，完成后将自动重启</span>}
+      {st.phase === 'downloading' && <span className="hint">下载中{pct != null ? ` ${pct}%` : '…'}</span>}
+      {st.phase === 'installing' && <span className="hint">正在安装</span>}
       {st.phase === 'none' && <span className="hint">已是最新</span>}
       {st.phase === 'error' && <span className="hint" style={{ color: 'var(--danger, #e07a5f)' }}>{st.error}</span>}
     </div>
+    {(st.phase === 'downloading' || st.phase === 'installing') && (
+      <div className="progress" style={{ marginTop: 8 }}>
+        <div className="bar"><div className={pct == null || st.phase === 'installing' ? 'indet' : ''} style={{ width: st.phase === 'installing' ? '45%' : ((pct ?? 8) + '%') }} /></div>
+        <span>{st.phase === 'installing' ? '正在安装' : (pct != null ? pct + '%' : '…')}</span>
+      </div>
+    )}
+    {st.phase === 'installing' && <div className="hint">正在关闭侧车、捆绑 Node 和本应用打开的浏览器，随后安装并自动重新打开。</div>}
     {st.phase === 'available' && upd && (
       <div className="card" style={{ marginTop: 10, padding: 10 }}>
         <b>v{upd.version}</b>

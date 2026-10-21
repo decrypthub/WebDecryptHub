@@ -7,6 +7,7 @@ import {EventEmitter} from 'node:events';
 import { NetCapture, MAX_RECORDS } from './netcap.mjs';
 import { summary } from './har.mjs';
 import { Injector } from './inject.mjs';
+import { killPidTree } from './proctree.mjs';
 
 class BrowserManager extends EventEmitter {
   constructor() {
@@ -248,6 +249,8 @@ class BrowserManager extends EventEmitter {
     const ctx = this.context; this.context = null;
     this.pages = []; this.activePage = null; this.cdpPort = null;
     if (ctx) await ctx.close().catch(() => {});
+    const chrome = this.chromePid; this.chromePid = null;
+    if (chrome) killPidTree(chrome);
     const tmp = this.tmpProfile; this.tmpProfile = null;
     if (tmp) setTimeout(() => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} }, 1500);
     this.emit('status', this.status());

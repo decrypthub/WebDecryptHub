@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { killPidTree } from './proctree.mjs';
 import { createRequire } from 'node:module';
 import https from 'node:https';
 import http from 'node:http';
@@ -260,11 +261,7 @@ function bucket(projectDir) {
   return { root, b };
 }
 function killTree(child) {
-  if (!child?.pid) return;
-  try {
-    if (process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL');
-    else child.kill();
-  } catch { try { child.kill('SIGKILL'); } catch {} }
+  killPidTree(child?.pid);
 }
 function jobText(job) {
   const state = job.code == null ? 'running' : (job.killed || job.signal ? `killed${job.signal ? ' ' + job.signal : ''}` : `exit ${job.code}`) + (job.timedOut ? ' timeout' : '');

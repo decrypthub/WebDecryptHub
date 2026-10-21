@@ -44,6 +44,9 @@ jobs:
         working-directory: sidecar
         run: node --test test/
 
+      - name: Update shutdown checks
+        run: node --test scripts/check-update-shutdown.mjs
+
       - name: Sidecar bun compile (linux)
         run: bun scripts/build-sidecar.mjs linux
 
