@@ -3,10 +3,10 @@ import {chat} from './llm.mjs';
 import fsx from 'node:fs';
 import {LOCAL_TOOLS} from './localtools.mjs';
 import pathx from 'node:path';
-import { contextTokens, modelLimit, splitForCompress, transcript, SUMMARY_PROMPT, trimToolOutput, readRef, resolveAttachments } from './context.mjs';
+import { contextTokens, limitInfo, compactTrigger, breakdown, microcompact, splitByTokens, buildSummaryRequest, SUMMARY_PREFIX, trimToolOutput, readRef, resolveAttachments, estimateTokens } from './context.mjs';
 
 const REF_TOOL = { name: 'context_ref_read', description: '读取被截断的长工具输出（截断提示里的 ctx_ref）。offset/length 分页（默认 6000 字符）。', schema: { type: 'object', properties: { ref: { type: 'string' }, offset: { type: 'number' }, length: { type: 'number' } }, required: ['ref'] } };
-const COMPRESS_AT = 0.75;
+const MAX_AUTO_PER_TURN = 2; // 防抖：单轮最多自动压缩 2 次（参考 Claude Code thrashing 保护）
 
 const SYSTEM = `你是一个专业的 JavaScript 逆向工程 AI 助手，在一个桌面应用内工作，通过工具操作一个受控的 Chrome 浏览器与本地分析引擎。你的任务是帮助用户分析网页中的签名、加密参数和混淆代码。
 
@@ -54,37 +54,54 @@ class Agent {
   }
 
   ctxDir() { return this.projectDir ? pathx.join(this.projectDir, '.ctx') : null; }
-  // 上下文用量：估算 × 校准系数（由真实 prompt_tokens 校准）
+  // 上下文用量：估算 × 校准系数（由真实 prompt_tokens 校准）+ 分类明细
   stats() {
     const settings = this.getSettings();
-    const est = contextTokens(this.wire(), this.allTools());
-    const limit = modelLimit(settings);
-    const used = Math.round(est * this.calib);
-    return { used, limit, pct: Math.min(1, used / limit), messages: this.messages.length - 1, compressions: this.compressions, compressing: this.compressing, threshold: COMPRESS_AT };
+    const tools = this.allTools();
+    const { limit, inferred } = limitInfo(settings);
+    const raw = breakdown(this.wire(true), tools);
+    const k = this.calib;
+    const parts = Object.fromEntries(Object.entries(raw).map(([n, v]) => [n, Math.round(v * k)]));
+    const used = Object.values(parts).reduce((x, y) => x + y, 0);
+    const trigger = compactTrigger(limit, settings.compactAt);
+    return { used, limit, inferred, pct: Math.min(1, used / limit), trigger, compactAt: settings.compactAt || 0.85, parts, messages: this.messages.length - 1, compressions: this.compressions, compressing: this.compressing };
   }
   emitContext(extra) { try { this.emit('context', { ...this.stats(), ...(extra || {}) }); } catch {} }
 
-  // 用真实 LLM 把较早的回合与工具结果压成摘要，最近回合原样保留
-  async compress({ reason = 'manual', keepTurns = 2, signal } = {}) {
+  // 两阶段压缩：① microcompact 收起旧工具结果（无 LLM 调用）② 结构化 LLM 摘要，最近 ~20k tokens 原样保留
+  async compress({ reason = 'manual', instructions = '', signal, force = false } = {}) {
     if (this.compressing) return { ok: false, error: '正在压缩' };
-    const { old, recent } = splitForCompress(this.messages, keepTurns);
-    if (old.length < 2) return { ok: false, error: '可压缩的历史太少' };
-    const before = this.stats().used;
+    const before = this.stats();
     this.compressing = true; this.emitContext();
     try {
-      const res = await chat(this.getSettings(), [{ role: 'system', content: SUMMARY_PROMPT }, { role: 'user', content: transcript(old) }], [], { signal, onDelta: () => {}, onReasoning: () => {} });
+      const mc = microcompact(this.messages, { dir: this.ctxDir(), keep: 3 });
+      const mid = this.stats();
+      if (mc.count && !force && reason === 'auto' && mid.used < mid.trigger) {
+        this.persist();
+        this.emitContext({ event: 'pruned', reason, before: before.used, after: mid.used, pruned: mc.count });
+        return { ok: true, stage: 'prune', before: before.used, after: mid.used };
+      }
+      const keep = Math.max(2000, Math.min(20000, Math.round(before.limit * 0.25)));
+      let { previousSummary, old, recent } = splitByTokens(this.messages, keep);
+      // 手动压缩且历史都在保留预算内：只保留最后一条回复原文，其余进摘要
+      if (old.length < 2 && reason === 'manual') ({ previousSummary, old, recent } = splitByTokens(this.messages, 0));
+      if (old.length < 2) {
+        if (mc.count) { this.persist(); this.emitContext({ event: 'pruned', reason, before: before.used, after: mid.used, pruned: mc.count }); return { ok: true, stage: 'prune', before: before.used, after: mid.used }; }
+        return { ok: false, error: '可压缩的历史太少' };
+      }
+      const t0 = Date.now();
+      const res = await chat(this.getSettings(), buildSummaryRequest(old, { previousSummary, instructions }), [], { signal, onDelta: () => {}, onReasoning: () => {} });
       const summary = String(res.content || '').trim();
       if (!summary) throw new Error('模型未返回摘要');
-      const dir = this.ctxDir();
-      for (const m of recent) if (m.role === 'tool' && m.content.length > 3000) m.content = trimToolOutput(m.content, { dir, name: m.name, limit: 3000, head: 1500 });
-      const head = [{ role: 'user', _summary: true, content: '【上下文摘要：较早的对话已压缩，以下为要点】\n' + summary }];
-      if (recent[0]?.role === 'user') head.push({ role: 'assistant', content: '已了解之前的上下文，继续。' });
+      const meta = { at: Date.now(), reason, instructions: instructions || '', before: before.used, summarized: old.length, ms: Date.now() - t0 };
+      const head = [{ role: 'user', _summary: meta, content: SUMMARY_PREFIX + summary }];
+      if (recent[0]?.role === 'user') head.push({ role: 'assistant', _ack: true, content: '已了解之前的上下文，继续。' });
       this.messages = [this.messages[0], ...head, ...recent];
       this.compressions++;
-      const after = this.stats().used; this.lastCompressAfter = after;
+      const after = this.stats().used; this.lastCompressAfter = after; meta.after = after;
       this.persist();
-      this.emitContext({ event: 'compressed', reason, before, after });
-      return { ok: true, before, after };
+      this.emitContext({ event: 'compressed', reason, before: before.used, after, instructions: meta.instructions, summary, pruned: mc.count, kept: recent.length, summarized: old.length });
+      return { ok: true, stage: 'summary', before: before.used, after, summary };
     } finally { this.compressing = false; this.emitContext(); }
   }
   // 新对话：当前历史归档到 .chats/ 后清空
@@ -93,11 +110,11 @@ class Agent {
     this.reset();
   }
 
-  reset() { this.messages = [{ role: 'system', content: SYSTEM }]; this.compressions = 0; this.lastCompressAfter = null; this.persist(); this.emitContext({ event: 'reset' }); }
+  reset() { this.messages = [{ role: 'system', content: SYSTEM }]; this.compressions = 0; this.lastCompressAfter = null; this.calib = 1; this.persist(); this.emitContext({ event: 'reset' }); }
   // 对话上下文落盘，重启应用后恢复（系统提示总用最新版本）
   histFile() { return this.projectDir ? this.projectDir + '/.agent-history.json' : null; }
   persist() { const f = this.histFile(); if (!f) return; try { fsx.writeFileSync(f, JSON.stringify(this.messages.slice(1).map(m => m.role === 'tool' ? { ...m, content: String(m.content).slice(0, 4000) } : m))); } catch {} }
-  restore() { const f = this.histFile(); try { const m = JSON.parse(fsx.readFileSync(f, 'utf8')); if (Array.isArray(m) && m.length) this.messages = [{ role: 'system', content: SYSTEM }, ...m]; } catch {} }
+  restore() { const f = this.histFile(); try { const m = JSON.parse(fsx.readFileSync(f, 'utf8')); if (Array.isArray(m) && m.length) { this.messages = [{ role: 'system', content: SYSTEM }, ...m]; this.compressions = m.filter(x => x._summary).length; } } catch {} }
 
   allTools() {
     const mcpTools = (this.mcp.tools || []).map(t => ({ name: t.name, description: t.description, schema: t.inputSchema }));
@@ -135,7 +152,8 @@ class Agent {
     } catch { return ''; }
   }
 
-  wire() { return this.messages.map(({ _compacted, _summary, ...m }) => m); }
+  // keepMeta=true 仅用于统计
+  wire(keepMeta) { return keepMeta ? this.messages : this.messages.map(({ _compacted, _summary, _attTok, _pruned, _ack, ...m }) => m); }
 
   async send(userText, { auto, maxSteps: stepsOverride, tokenBudget, attachments } = {}) {
     if (this.running) throw new Error('Agent 正在运行');
@@ -144,7 +162,8 @@ class Agent {
     const content = auto ? AUTO_PROMPT : userText;
     const note = this.stateNote();
     const att = attachments?.length ? await resolveAttachments(attachments, { browser: this.browser, projectDir: this.projectDir }).catch(e => '附件解析失败: ' + e.message) : '';
-    this.messages.push({ role: 'user', content: [content, att, note].filter(Boolean).join('\n\n') });
+    this.messages.push({ role: 'user', content: [content, att, note].filter(Boolean).join('\n\n'), ...(att ? { _attTok: estimateTokens(att) } : {}) });
+    let autoTries = 0;
     this.emit('user', content);
     const usage = { prompt: 0, completion: 0, reasoning: 0, cached: 0, calls: 0, ms: 0 };
     const budget = tokenBudget || settings.tokenBudget || 0;
@@ -159,15 +178,17 @@ class Agent {
           this.messages.push({ role: 'user', content: `【系统】已达${stop === 'max-steps' ? `步数上限（${maxSteps} 步）` : stop === 'time-limit' ? '时间上限' : 'Token 预算上限'}，请不要再调用工具，直接用中文总结目前的全部发现：目标参数、所在脚本与函数、算法判断、复现进度与缺口。` });
         }
         steps++;
-        this.compact();
-        // 接近上下文上限：先用模型摘要压缩；失败则退回硬截断，保证本步能发出
-        // 冷却：上次压缩后需再增长 ≥10% 窗口才再次自动压缩（系统提示+工具定义本身很大时避免每步重复压缩）
+        microcompact(this.messages, { dir: this.ctxDir(), keep: 6, minChars: 6000 });
+        // 达到触发线：先收起旧工具结果，仍超线再做 LLM 摘要；冷却（需再增长 10% 窗口）+ 单轮上限防止反复压缩
         const st0 = this.stats();
-        if (st0.pct >= COMPRESS_AT && (this.lastCompressAfter == null || st0.used - this.lastCompressAfter >= 0.1 * st0.limit)) {
-          this.emit('log', '上下文接近上限，自动压缩…');
+        if (st0.used >= st0.trigger && autoTries < MAX_AUTO_PER_TURN && (this.lastCompressAfter == null || st0.used - this.lastCompressAfter >= 0.1 * st0.limit)) {
+          autoTries++;
+          this.emit('log', `上下文 ${st0.used}/${st0.limit}，自动压缩…`);
           try { const r = await this.compress({ reason: 'auto', signal: this.abort.signal }); if (!r?.ok) this.lastCompressAfter = this.stats().used; }
-          catch (e) { this.emit('log', '自动压缩失败，改为截断旧工具输出: ' + e.message); this.compact(2, 600); this.lastCompressAfter = this.stats().used; }
+          catch (e) { this.emit('log', '自动压缩失败: ' + e.message); this.lastCompressAfter = this.stats().used; }
         }
+        // 兜底：仍逼近窗口上限则硬截断旧工具输出，保证本步能发出
+        if (this.stats().used > this.stats().limit * 0.97) this.compact(2, 600);
         const estBefore = contextTokens(this.wire(), final ? [] : this.allTools());
         this.emit('assistant-start', { step: steps });
         const t0 = Date.now();

@@ -39,6 +39,8 @@ const ICONS = {
   pause: <><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor" stroke="none" /><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor" stroke="none" /></>,
   key: <><circle cx="7.5" cy="15.5" r="4.5" /><path d="M10.7 12.3L21 2M17 6l3 3M14.5 8.5l2.5 2.5" /></>,
   search: <><circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" /></>,
+  layers: <><path d="M12 3 3 8l9 5 9-5-9-5z" /><path d="m3 13 9 5 9-5" /></>,
+  chevup: <path d="m6 15 6-6 6 6" />,
   chevdown: <path d="M6 9l6 6 6-6" />,
   chevright: <path d="M9 6l6 6-6 6" />,
   dot: <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none" />,

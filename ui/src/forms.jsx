@@ -7,6 +7,20 @@ function deepUp(setS) {
   return (p, v) => setS(prev => { const c = JSON.parse(JSON.stringify(prev)); const ks = p.split('.'); let o = c; for (let i = 0; i < ks.length - 1; i++) o = o[ks[i]]; o[ks[ks.length - 1]] = v; return c; });
 }
 
+// 上下文窗口：快捷档位 + 自定义；空值 = 按模型名推断
+export const WINDOW_PRESETS = [[128000, '128K'], [256000, '256K'], [300000, '300K'], [500000, '500K'], [1000000, '1M']];
+export function WindowChips({ value, onChange, inferredLimit }) {
+  const preset = WINDOW_PRESETS.some(([v]) => v === value);
+  const [custom, setCustom] = useState(!preset && value ? String(Math.round(value / 1000)) : '');
+  useEffect(() => { if (!preset && value) setCustom(String(Math.round(value / 1000))); }, [value, preset]);
+  const commit = t => { const k = parseFloat(t); if (k >= 4) onChange(Math.round(k * 1000)); };
+  return <div className="wchips">
+    <button className={!value ? 'on' : ''} onClick={() => { setCustom(''); onChange(0); }} title={inferredLimit ? `按模型名推断：${Math.round(inferredLimit / 1000)}K` : '按模型名推断'}>自动</button>
+    {WINDOW_PRESETS.map(([v, l]) => <button key={v} className={value === v ? 'on' : ''} onClick={() => { setCustom(''); onChange(v); }}>{l}</button>)}
+    <span className={'wcustom ' + (value && !preset ? 'on' : '')}><input value={custom} placeholder="自定义" inputMode="numeric" onChange={e => setCustom(e.target.value.replace(/[^\d.]/g, ''))} onBlur={e => commit(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); commit(e.target.value); e.target.blur(); } }} />K</span>
+  </div>;
+}
+
 function ProviderFields({ s, up }) {
   const c = s.provider === 'anthropic' ? 'anthropic' : 'openai';
   return <>
@@ -118,9 +132,12 @@ export function SettingsPane({ initial, onSave, toast }) {
     <section><h3>分析</h3>
       <div className="row2">
         <div className="field"><label>最大步数</label><input type="number" min="5" max="200" value={s.maxSteps} onChange={e => up('maxSteps', +e.target.value)} /></div>
-        <div className="field"><label>上下文窗口</label><input type="number" min="0" step="1000" value={s.contextWindow || ''} placeholder="自动（按模型）" onChange={e => up('contextWindow', +e.target.value || 0)} /><div className="hint">tokens，用量达 75% 自动压缩</div></div>
         <div className="field"><label>温度</label><input type="number" step="0.1" min="0" max="1" value={s.temperature} onChange={e => up('temperature', +e.target.value)} /></div>
       </div>
+      <div className="field"><label>上下文窗口<span className="lbl-sub">{(s.provider === 'anthropic' ? s.anthropic.model : s.openai.model) || '当前模型'}</span></label>
+        <WindowChips value={(s.provider === 'anthropic' ? s.anthropic : s.openai).contextWindow || 0} onChange={v => up((s.provider === 'anthropic' ? 'anthropic' : 'openai') + '.contextWindow', v)} /></div>
+      <div className="field"><label>自动压缩</label><div className="seg-ctl sm">{[[0.8, '80%'], [0.85, '85%'], [0.9, '90%']].map(([v, l]) => <button key={v} className={(s.compactAt || 0.85) === v ? 'on' : ''} onClick={() => up('compactAt', v)}>{l}</button>)}</div>
+        <div className="hint">先收起旧工具结果，仍超出再由模型生成结构化摘要；最近的对话原样保留</div></div>
     </section>
     <UpdateSection toast={toast} info={info} />
     <section><h3>关于</h3>

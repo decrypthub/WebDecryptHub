@@ -11,7 +11,7 @@ const DEFAULTS = {
   // 浏览器显示方式：auto = Windows 有头时嵌入真实 Chrome 窗口，其它平台/无头用 screencast；embedded / screencast 强制
   embedMode: 'auto',
   kernel: 'system', // system = 系统 Chrome/Edge；bundled = 按需下载到应用数据目录的 Chromium (Chrome for Testing)
-  contextWindow: 0, // 模型上下文上限 tokens；0 = 按模型名推断
+  compactAt: 0.85, // 自动压缩阈值（占上下文窗口比例）；窗口本身随模型保存在 openai/anthropic.contextWindow，未设置则按模型名推断
 };
 
 export function userDataDir() {
@@ -33,6 +33,9 @@ export function load() {
   let raw = {};
   try { raw = JSON.parse(fs.readFileSync(file(), 'utf8')); } catch {}
   const s = { ...DEFAULTS, ...raw, openai: { ...DEFAULTS.openai, ...(raw.openai || {}) }, anthropic: { ...DEFAULTS.anthropic, ...(raw.anthropic || {}) } };
+  // 迁移：旧版全局 contextWindow → 当前 provider 的模型配置
+  if (Number(s.contextWindow) >= 4000) { const k = s.provider === 'anthropic' ? 'anthropic' : 'openai'; if (!s[k].contextWindow) s[k].contextWindow = Number(s.contextWindow); }
+  delete s.contextWindow;
   s.openai.apiKey = dec(s.openai.apiKey); s.anthropic.apiKey = dec(s.anthropic.apiKey);
   if (process.env.JSRA_OPENAI_BASE) { s.provider = 'openai'; s.openai.baseUrl = process.env.JSRA_OPENAI_BASE; if (process.env.JSRA_OPENAI_KEY) s.openai.apiKey = process.env.JSRA_OPENAI_KEY; if (process.env.JSRA_OPENAI_MODEL) s.openai.model = process.env.JSRA_OPENAI_MODEL; }
   if (s.provider !== 'openai' && s.provider !== 'anthropic') s.provider = 'openai'; // 旧版 mock 设置迁移

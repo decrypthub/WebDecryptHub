@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback, useReducer } from 'react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { Icon, EmptyState, useToasts, Markdown, LogoMark } from './components.jsx';
-import { SettingsPane, FirstRun } from './forms.jsx';
+import { SettingsPane, FirstRun, WindowChips } from './forms.jsx';
 import { onConnState, native } from './transport.js';
 import { TitleBar } from './titlebar.jsx';
 import { NetworkPane } from './network.jsx';
@@ -97,7 +97,7 @@ export default function App() {
       on('log', (v, s) => s && dispatch({ t: 'log', sid: s, v: String(v) })),
       on('frame', (f, s) => { if (s === sidRef.current) drawFrame(f); }),
       on('agent-user', (c, s) => { const a = lastAtt.current[s]; lastAtt.current[s] = null; dispatch({ t: 'ev', sid: s, v: { type: 'user', content: c, atts: a || undefined } }); }),
-      on('agent-context', (v, s) => { dispatch({ t: 'patch', sid: s, patch: { ctx: v } }); if (v?.event === 'compressed') dispatch({ t: 'ev', sid: s, v: { type: 'note', content: `上下文已${v.reason === 'auto' ? '自动' : ''}压缩 ${fmtK(v.before)} → ${fmtK(v.after)}` } }); }),
+      on('agent-context', (v, s) => { dispatch({ t: 'patch', sid: s, patch: { ctx: v } }); if (v?.event === 'compressed' || v?.event === 'pruned') dispatch({ t: 'ev', sid: s, v: { type: 'compact', stage: v.event, reason: v.reason, before: v.before, after: v.after, instructions: v.instructions || '', summary: v.summary || '', pruned: v.pruned || 0, summarized: v.summarized || 0, at: Date.now() } }); }),
       on('agent-assistant-start', (v, s) => dispatch({ t: 'ev', sid: s, v: { type: 'assistant', content: '' } })),
       on('agent-delta', (d, s) => dispatch({ t: 'delta', sid: s, v: d })),
       on('agent-reasoning', (v, s) => dispatch({ t: 'patch', sid: s, patch: { thinking: true } })),
@@ -216,6 +216,8 @@ export default function App() {
   async function send(auto) {
     if (cur.agentRunning) return;
     const text = auto ? '' : input.trim(); if (!auto && !text) return;
+    const cm = !auto && text.match(/^\/compact(?:\s+([\s\S]*))?$/);
+    if (cm) { setInput(''); if (inputRef.current) inputRef.current.style.height = ''; return compactNow(cm[1] || ''); }
     if (!cur.status.running) { toast('请先在左侧打开目标网址', 'warn'); return; }
     const list = auto ? [] : (atts[sid] || []);
     lastAtt.current[sid] = list.length ? list.map(a => a.label) : null;
@@ -223,6 +225,14 @@ export default function App() {
     if (!r?.ok) { toast(r?.error || '发送失败', 'warn'); if (/API Key/.test(r?.error || '')) setRtab('settings'); return; }
     dispatch({ t: 'patch', sid, patch: { agentRunning: true } }); if (!auto) { setAtts(m => ({ ...m, [sid]: [] })); setInput(''); if (inputRef.current) inputRef.current.style.height = ''; }
     setRtab('chat');
+  }
+  async function compactNow(instructions) {
+    setRtab('chat');
+    const r = await inv('agent-compress', { instructions }); if (!r?.ok) toast(r?.error || '压缩失败', 'warn');
+  }
+  async function setWindow(v) {
+    const c = settings.provider === 'anthropic' ? 'anthropic' : 'openai';
+    await saveSettings({ ...settings, [c]: { ...settings[c], contextWindow: v } }, true);
   }
   async function cleanRetry(e) {
     const fresh = !!e?.shiftKey;
@@ -299,11 +309,12 @@ export default function App() {
             </div>
             <div className="rbody">
               {rtab === 'chat' && <ChatPane cur={cur} atts={atts[sid] || []} rmAtt={k => rmAtt(sid, k)} addAtt={l => addAtt(sid, l)} toast={toast}
-                ctxAct={async act => {
-                  if (act === 'compress') { const r = await inv('agent-compress'); if (!r?.ok) toast(r?.error || '压缩失败', 'warn'); }
+                ctxAct={async (act, arg) => {
+                  if (act === 'compress') await compactNow(arg || '');
+                  else if (act === 'window') await setWindow(arg);
                   else if (act === 'clear') { await inv('agent-reset'); dispatch({ t: 'ev', sid, v: { type: 'note', content: '上下文已清空，AI 不再记得以上内容' } }); }
                   else if (act === 'new') { await inv('agent-new-chat'); dispatch({ t: 'patch', sid, patch: { events: [], usage: null } }); }
-                }} chatRef={chatRef} input={input} setInput={setInput} inputRef={inputRef} send={send} cleanRetry={cleanRetry} inv={inv} hasKey={hasKey} goSettings={() => setRtab('settings')} />}
+                }} winVal={(settings.provider === 'anthropic' ? settings.anthropic : settings.openai).contextWindow || 0} chatRef={chatRef} input={input} setInput={setInput} inputRef={inputRef} send={send} cleanRetry={cleanRetry} inv={inv} hasKey={hasKey} goSettings={() => setRtab('settings')} />}
               {rtab === 'evidence' && <NetworkPane key={sid} cur={cur} inv={inv} toast={toast} onAttach={l => addAtt(sid, l)} />}
               {rtab === 'code' && <CodePane key={sid} sid={sid} inv={inv} toast={toast} events={cur.events} onAttach={l => addAtt(sid, l)} />}
               {rtab === 'settings' && <SettingsPane initial={settings} onSave={saveSettings} toast={toast} />}
@@ -328,24 +339,49 @@ const isApi = r => r.type === 'xhr' || r.type === 'fetch';
 function hostOf(u) { try { return new URL(u).host; } catch { return ''; } }
 function shortUrl(u) { try { const x = new URL(u); return x.host + x.pathname; } catch { return (u || '').slice(0, 60); } }
 
-const fmtK = n => n == null ? '-' : n >= 1000 ? (n / 1000).toFixed(n >= 100000 ? 0 : 1).replace(/\.0$/, '') + 'k' : String(n);
+const fmtK = n => n == null ? '-' : n >= 1000000 ? (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M' : n >= 1000 ? (n / 1000).toFixed(n >= 100000 ? 0 : 1).replace(/\.0$/, '') + 'k' : String(n);
 const ATT_ICON = { page: 'globe', request: 'network', script: 'code', snippet: 'code', file: 'file' };
 
-function ContextMeter({ ctx, onAct, busy }) {
+const CTX_PARTS = [['system', '系统提示'], ['tools', '工具定义'], ['summary', '压缩摘要'], ['history', '对话'], ['attachments', '附件'], ['toolResults', '工具结果']];
+function ContextMeter({ ctx, onAct, busy, winVal }) {
   const [open, setOpen] = useState(false);
+  const [ins, setIns] = useState('');
+  const box = useRef(null);
+  useEffect(() => { if (!open) return; const h = e => { if (box.current && !box.current.contains(e.target)) setOpen(false); }; document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h); }, [open]);
   const pct = ctx ? Math.min(1, ctx.pct || 0) : 0;
-  const lvl = pct >= 0.75 ? 'hi' : pct >= 0.5 ? 'mid' : '';
+  const at = ctx?.trigger && ctx?.limit ? ctx.trigger / ctx.limit : 0.85;
+  const lvl = pct >= at ? 'hi' : pct >= at - 0.2 ? 'mid' : '';
   const R = 6.5, C = 2 * Math.PI * R;
-  return <div className="menu-wrap">
-    <button className={'ctxm ' + lvl} onClick={() => setOpen(o => !o)} title={ctx ? `上下文 ${ctx.used} / ${ctx.limit} tokens（估算）· 已压缩 ${ctx.compressions} 次` : '上下文'}>
+  const parts = ctx?.parts || {};
+  const act = (a, v) => { onAct(a, v); if (a !== 'window') setOpen(false); if (a === 'compress') setIns(''); };
+  return <div className="menu-wrap" ref={box}>
+    <button className={'ctxm ' + lvl} onClick={() => setOpen(o => !o)} title={open ? undefined : '上下文用量'}>
       <svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r={R} className="trk" /><circle cx="8" cy="8" r={R} className="val" strokeDasharray={`${C * pct} ${C}`} transform="rotate(-90 8 8)" /></svg>
       <span>{ctx?.compressing ? '压缩中' : `${fmtK(ctx?.used)} / ${fmtK(ctx?.limit)}`}</span>
     </button>
-    {open && <div className="menu up right" onMouseLeave={() => setOpen(false)} onClick={() => setOpen(false)}>
-      <button onClick={() => onAct('compress')} disabled={busy || !ctx?.messages}>压缩上下文<span>{Math.round(pct * 100)}%</span></button>
-      <button onClick={() => onAct('clear')} disabled={busy || !ctx?.messages}>清空上下文</button>
-      <button onClick={() => onAct('new')} disabled={busy}>新对话</button>
+    {open && <div className="menu up right ctxpop">
+      <div className="cp-head"><b>{fmtK(ctx?.used)}</b><span> / {fmtK(ctx?.limit)}</span><span className="grow" /><b>{Math.round(pct * 100)}%</b></div>
+      <div className="cp-bar">{CTX_PARTS.map(([k]) => parts[k] > 0 && <i key={k} className={'p-' + k} style={{ width: (parts[k] / (ctx.limit || 1) * 100) + '%' }} />)}<em style={{ left: at * 100 + '%' }} title="自动压缩线" /></div>
+      <div className="cp-rows">{CTX_PARTS.map(([k, l]) => <div key={k} className={parts[k] ? '' : 'z'}><i className={'p-' + k} />{l}<span>{fmtK(parts[k] || 0)}</span></div>)}</div>
+      <div className="cp-note">{Math.round(at * 100)}% 时自动压缩{ctx?.compressions ? ` · 已压缩 ${ctx.compressions} 次` : ''}{ctx?.inferred ? ' · 窗口按模型推断' : ''}</div>
+      <div className="cp-sec">上下文窗口</div>
+      <WindowChips value={winVal} onChange={v => act('window', v)} inferredLimit={ctx?.inferred ? ctx.limit : 0} />
+      <div className="cp-sec">压缩</div>
+      <div className="cp-compact"><input value={ins} onChange={e => setIns(e.target.value)} placeholder="重点保留（可选），如：sign 算法" onKeyDown={e => { if (e.key === 'Enter' && !busy && ctx?.messages) act('compress', ins.trim()); }} />
+        <button className="btn btn-sm" onClick={() => act('compress', ins.trim())} disabled={busy || !ctx?.messages}>压缩</button></div>
+      <div className="cp-foot"><button className="btn-ghost btn-sm" onClick={() => act('clear')} disabled={busy || !ctx?.messages}>清空上下文</button><button className="btn-ghost btn-sm" onClick={() => act('new')} disabled={busy}>新对话</button></div>
     </div>}
+  </div>;
+}
+
+function CompactMark({ e }) {
+  const [open, setOpen] = useState(false);
+  const label = e.stage === 'pruned' ? `已收起 ${e.pruned} 个旧工具结果` : `${e.reason === 'auto' ? '自动' : ''}压缩了 ${e.summarized || ''} 条较早消息`;
+  return <div className={'cmark ' + (open ? 'open' : '')}>
+    <div className="cm-line" onClick={() => e.summary && setOpen(o => !o)}>
+      <span className="cm-rule" /><span className="cm-t"><Icon n="layers" size={12} />{label} · {fmtK(e.before)} → {fmtK(e.after)}{e.instructions ? ` · 重点：${e.instructions}` : ''}{e.summary && <Icon n={open ? 'chevup' : 'chevdown'} size={11} />}</span><span className="cm-rule" />
+    </div>
+    {open && <div className="cm-body"><Markdown text={e.summary} /></div>}
   </div>;
 }
 
@@ -370,7 +406,7 @@ function AttachMenu({ cur, inv, addAtt, toast }) {
   </div>;
 }
 
-function ChatPane({ cur, atts, rmAtt, addAtt, toast, ctxAct, chatRef, input, setInput, inputRef, send, cleanRetry, inv, hasKey, goSettings }) {
+function ChatPane({ cur, atts, rmAtt, addAtt, toast, ctxAct, winVal, chatRef, input, setInput, inputRef, send, cleanRetry, inv, hasKey, goSettings }) {
   return <div className="chat">
     <div className="chat-scroll" ref={chatRef}>
       {!hasKey && <div className="callout warn"><Icon n="info" size={14} />尚未配置模型 API Key。<button className="linkbtn" onClick={goSettings}>去设置</button></div>}
@@ -383,7 +419,7 @@ function ChatPane({ cur, atts, rmAtt, addAtt, toast, ctxAct, chatRef, input, set
       {atts.length > 0 && <div className="att-chips">{atts.map(a => <span key={a.key} className="att" title={a.label}><Icon n={ATT_ICON[a.kind] || 'file'} size={11} /><span className="t">{a.label}</span><button onClick={() => rmAtt(a.key)} title="移除"><Icon n="x" size={10} /></button></span>)}</div>}
       <textarea ref={inputRef} value={input} rows={1} onChange={e => { setInput(e.target.value); e.target.style.height = 'auto'; e.target.style.height = Math.min(160, e.target.scrollHeight) + 'px'; }}
         onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(false); } }}
-        placeholder={cur.agentRunning ? 'AI 正在分析…' : '描述要分析的参数（Enter 发送，Shift+Enter 换行）'} disabled={cur.agentRunning} />
+        placeholder={cur.agentRunning ? 'AI 正在分析…' : '描述要分析的参数（Enter 发送 · /compact 压缩上下文）'} disabled={cur.agentRunning} />
       <div className="composer-bar">
         {cur.agentRunning ? <>
           <button className="btn btn-sm" onClick={() => inv('agent-wrapup')} title="不再调用工具，立即总结"><Icon n="flag" size={12} />收尾总结</button>
@@ -394,8 +430,8 @@ function ChatPane({ cur, atts, rmAtt, addAtt, toast, ctxAct, chatRef, input, set
         </>}
         <span className="grow" />
         {!cur.agentRunning && <AttachMenu cur={cur} inv={inv} addAtt={addAtt} toast={toast} />}
-        <ContextMeter ctx={cur.ctx} onAct={ctxAct} busy={cur.agentRunning || cur.ctx?.compressing} />
-        <button className="btn-primary btn-icon send" onClick={() => send(false)} disabled={cur.agentRunning || !input.trim() || !cur.status.running} title="发送"><Icon n="send" size={14} /></button>
+        <ContextMeter ctx={cur.ctx} onAct={ctxAct} winVal={winVal} busy={cur.agentRunning || cur.ctx?.compressing} />
+        <button className="btn-primary btn-icon send" onClick={() => send(false)} disabled={cur.agentRunning || !input.trim() || (!cur.status.running && !/^\/compact\b/.test(input.trim()))} title="发送"><Icon n="send" size={14} /></button>
       </div>
     </div>
   </div>;
@@ -406,6 +442,7 @@ function EventView({ e }) {
   if (e.type === 'user') return <div className="msg user"><div className="bubble">{e.content || '一键自动分析'}{e.atts?.length > 0 && <div className="att-chips in">{e.atts.map((l, i) => <span key={i} className="att"><span className="t">{l}</span></span>)}</div>}</div></div>;
   if (e.type === 'assistant') return e.content ? <div className="msg assistant"><div className="bubble"><Markdown text={e.content} /></div></div> : null;
   if (e.type === 'error') return <div className="callout err"><Icon n="info" size={14} />{e.content}</div>;
+  if (e.type === 'compact') return <CompactMark e={e} />;
   if (e.type === 'note') return <div className="callout"><Icon n="info" size={14} />{e.content}</div>;
   if (e.type === 'tool') {
     const st = e.result === undefined ? 'run' : e.isError ? 'err' : 'ok';

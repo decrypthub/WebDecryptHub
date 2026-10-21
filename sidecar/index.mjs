@@ -55,7 +55,7 @@ async function startServer() {
   let downloading = null;
   const handlers = {
     'get-settings': () => settings,
-    'save-settings': s => { settings = { ...settings, ...s, openai: { ...settings.openai, ...(s?.openai || {}) }, anthropic: { ...settings.anthropic, ...(s?.anthropic || {}) } }; settingsMod.save(settings); return true; },
+    'save-settings': s => { settings = { ...settings, ...s, openai: { ...settings.openai, ...(s?.openai || {}) }, anthropic: { ...settings.anthropic, ...(s?.anthropic || {}) } }; settingsMod.save(settings); for (const x of sessions.sessions.values()) if (x.agent) x.agent.emitContext(); return true; },
     'doctor': () => {
       const chromes = chromeMod.findChrome(settingsMod.userDataDir(), settings.chromePath);
       return { runtime: runtimeInfo, chrome: chromes, chromeOk: chromes.length > 0, downloading: !!downloading, version: process.env.JSRA_APP_VERSION || '' };
@@ -113,7 +113,7 @@ async function startServer() {
     'agent-reset': a => { S(a).ensureAgent().reset(); return true; },
     'agent-new-chat': a => { const s = S(a); if (s.agent?.running) return false; s.ensureAgent().newChat(); return true; },
     'agent-context': a => S(a).ensureAgent().stats(),
-    'agent-compress': async a => { const s = S(a); const ag = s.ensureAgent(); if (ag.running) return { ok: false, error: 'AI 运行中，将在接近上限时自动压缩' }; try { return await ag.compress({ reason: 'manual' }); } catch (e) { return { ok: false, error: e.message }; } },
+    'agent-compress': async a => { const s = S(a); const ag = s.ensureAgent(); if (ag.running) return { ok: false, error: 'AI 运行中，将在接近上限时自动压缩' }; try { return await ag.compress({ reason: 'manual', instructions: String(a?.instructions || '').slice(0, 500), force: true }); } catch (e) { return { ok: false, error: e.message }; } },
     'test-connection': async (override) => {
       const { testConnection } = await import('./llm.mjs');
       const merged = override ? { ...settings, ...override, openai: { ...settings.openai, ...(override.openai || {}) }, anthropic: { ...settings.anthropic, ...(override.anthropic || {}) } } : settings;
