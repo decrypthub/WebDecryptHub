@@ -10,6 +10,8 @@ const DEFAULTS = {
   antiDebug: false, headless: false, chromePath: '', isolated: false, proxy: '',
   // 浏览器显示方式：auto = Windows 有头时嵌入真实 Chrome 窗口，其它平台/无头用 screencast；embedded / screencast 强制
   embedMode: 'auto',
+  kernel: 'system', // system = 系统 Chrome/Edge；bundled = 按需下载到应用数据目录的 Chromium (Chrome for Testing)
+  contextWindow: 0, // 模型上下文上限 tokens；0 = 按模型名推断
 };
 
 export function userDataDir() {
@@ -37,6 +39,8 @@ export function load() {
   if (s.openai.model === 'mock') s.openai.model = '';
   if (process.env.JSRA_HEADLESS) s.headless = process.env.JSRA_HEADLESS === '1';
   if (!['auto', 'embedded', 'screencast'].includes(s.embedMode)) s.embedMode = 'auto';
+  if (!['system', 'bundled'].includes(s.kernel)) s.kernel = 'system';
+  if (process.env.JSRA_KERNEL) s.kernel = process.env.JSRA_KERNEL;
   if (process.env.JSRA_EMBED_MODE) s.embedMode = process.env.JSRA_EMBED_MODE;
   return s;
 }

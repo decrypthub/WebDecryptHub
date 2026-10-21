@@ -2,6 +2,11 @@
 import {chat} from './llm.mjs';
 import fsx from 'node:fs';
 import {LOCAL_TOOLS} from './localtools.mjs';
+import pathx from 'node:path';
+import { contextTokens, modelLimit, splitForCompress, transcript, SUMMARY_PROMPT, trimToolOutput, readRef, resolveAttachments } from './context.mjs';
+
+const REF_TOOL = { name: 'context_ref_read', description: '读取被截断的长工具输出（截断提示里的 ctx_ref）。offset/length 分页（默认 6000 字符）。', schema: { type: 'object', properties: { ref: { type: 'string' }, offset: { type: 'number' }, length: { type: 'number' } }, required: ['ref'] } };
+const COMPRESS_AT = 0.75;
 
 const SYSTEM = `你是一个专业的 JavaScript 逆向工程 AI 助手，在一个桌面应用内工作，通过工具操作一个受控的 Chrome 浏览器与本地分析引擎。你的任务是帮助用户分析网页中的签名、加密参数和混淆代码。
 
@@ -45,9 +50,50 @@ class Agent {
     this.getSettings = getSettings; this.emit = emit;
     this.messages = [{ role: 'system', content: SYSTEM }];
     this.running = false; this.abort = null; this.wrapUp = false;
+    this.calib = 1; this.compressions = 0; this.compressing = false;
   }
 
-  reset() { this.messages = [{ role: 'system', content: SYSTEM }]; this.persist(); }
+  ctxDir() { return this.projectDir ? pathx.join(this.projectDir, '.ctx') : null; }
+  // 上下文用量：估算 × 校准系数（由真实 prompt_tokens 校准）
+  stats() {
+    const settings = this.getSettings();
+    const est = contextTokens(this.wire(), this.allTools());
+    const limit = modelLimit(settings);
+    const used = Math.round(est * this.calib);
+    return { used, limit, pct: Math.min(1, used / limit), messages: this.messages.length - 1, compressions: this.compressions, compressing: this.compressing, threshold: COMPRESS_AT };
+  }
+  emitContext(extra) { try { this.emit('context', { ...this.stats(), ...(extra || {}) }); } catch {} }
+
+  // 用真实 LLM 把较早的回合与工具结果压成摘要，最近回合原样保留
+  async compress({ reason = 'manual', keepTurns = 2, signal } = {}) {
+    if (this.compressing) return { ok: false, error: '正在压缩' };
+    const { old, recent } = splitForCompress(this.messages, keepTurns);
+    if (old.length < 2) return { ok: false, error: '可压缩的历史太少' };
+    const before = this.stats().used;
+    this.compressing = true; this.emitContext();
+    try {
+      const res = await chat(this.getSettings(), [{ role: 'system', content: SUMMARY_PROMPT }, { role: 'user', content: transcript(old) }], [], { signal, onDelta: () => {}, onReasoning: () => {} });
+      const summary = String(res.content || '').trim();
+      if (!summary) throw new Error('模型未返回摘要');
+      const dir = this.ctxDir();
+      for (const m of recent) if (m.role === 'tool' && m.content.length > 3000) m.content = trimToolOutput(m.content, { dir, name: m.name, limit: 3000, head: 1500 });
+      const head = [{ role: 'user', _summary: true, content: '【上下文摘要：较早的对话已压缩，以下为要点】\n' + summary }];
+      if (recent[0]?.role === 'user') head.push({ role: 'assistant', content: '已了解之前的上下文，继续。' });
+      this.messages = [this.messages[0], ...head, ...recent];
+      this.compressions++;
+      const after = this.stats().used; this.lastCompressAfter = after;
+      this.persist();
+      this.emitContext({ event: 'compressed', reason, before, after });
+      return { ok: true, before, after };
+    } finally { this.compressing = false; this.emitContext(); }
+  }
+  // 新对话：当前历史归档到 .chats/ 后清空
+  newChat() {
+    try { if (this.messages.length > 1 && this.projectDir) { const d = pathx.join(this.projectDir, '.chats'); fsx.mkdirSync(d, { recursive: true }); fsx.writeFileSync(pathx.join(d, Date.now() + '.json'), JSON.stringify(this.messages.slice(1))); } } catch {}
+    this.reset();
+  }
+
+  reset() { this.messages = [{ role: 'system', content: SYSTEM }]; this.compressions = 0; this.lastCompressAfter = null; this.persist(); this.emitContext({ event: 'reset' }); }
   // 对话上下文落盘，重启应用后恢复（系统提示总用最新版本）
   histFile() { return this.projectDir ? this.projectDir + '/.agent-history.json' : null; }
   persist() { const f = this.histFile(); if (!f) return; try { fsx.writeFileSync(f, JSON.stringify(this.messages.slice(1).map(m => m.role === 'tool' ? { ...m, content: String(m.content).slice(0, 4000) } : m))); } catch {} }
@@ -56,13 +102,14 @@ class Agent {
   allTools() {
     const mcpTools = (this.mcp.tools || []).map(t => ({ name: t.name, description: t.description, schema: t.inputSchema }));
     const local = LOCAL_TOOLS.map(t => ({ name: t.name, description: t.description, schema: t.schema }));
-    return [...mcpTools, ...local];
+    return [...mcpTools, ...local, REF_TOOL];
   }
 
   async runTool(name, args) {
     const local = LOCAL_TOOLS.find(t => t.name === name);
     const ctx = { projectDir: this.projectDir, browser: this.browser, mcp: this.mcp, relaunch: this.relaunch };
     if (local) return await local.run(args || {}, ctx);
+    if (name === REF_TOOL.name) return readRef(this.ctxDir(), args?.ref, args?.offset, args?.length);
     if (this.mcp.has(name)) return await this.mcp.call(name, args, this.abort?.signal);
     return { text: `未知工具：${name}`, isError: true };
   }
@@ -88,15 +135,16 @@ class Agent {
     } catch { return ''; }
   }
 
-  wire() { return this.messages.map(({ _compacted, ...m }) => m); }
+  wire() { return this.messages.map(({ _compacted, _summary, ...m }) => m); }
 
-  async send(userText, { auto, maxSteps: stepsOverride, tokenBudget } = {}) {
+  async send(userText, { auto, maxSteps: stepsOverride, tokenBudget, attachments } = {}) {
     if (this.running) throw new Error('Agent 正在运行');
     this.running = true; this.abort = new AbortController();
     const settings = this.getSettings();
     const content = auto ? AUTO_PROMPT : userText;
     const note = this.stateNote();
-    this.messages.push({ role: 'user', content: note ? content + '\n\n' + note : content });
+    const att = attachments?.length ? await resolveAttachments(attachments, { browser: this.browser, projectDir: this.projectDir }).catch(e => '附件解析失败: ' + e.message) : '';
+    this.messages.push({ role: 'user', content: [content, att, note].filter(Boolean).join('\n\n') });
     this.emit('user', content);
     const usage = { prompt: 0, completion: 0, reasoning: 0, cached: 0, calls: 0, ms: 0 };
     const budget = tokenBudget || settings.tokenBudget || 0;
@@ -112,6 +160,15 @@ class Agent {
         }
         steps++;
         this.compact();
+        // 接近上下文上限：先用模型摘要压缩；失败则退回硬截断，保证本步能发出
+        // 冷却：上次压缩后需再增长 ≥10% 窗口才再次自动压缩（系统提示+工具定义本身很大时避免每步重复压缩）
+        const st0 = this.stats();
+        if (st0.pct >= COMPRESS_AT && (this.lastCompressAfter == null || st0.used - this.lastCompressAfter >= 0.1 * st0.limit)) {
+          this.emit('log', '上下文接近上限，自动压缩…');
+          try { const r = await this.compress({ reason: 'auto', signal: this.abort.signal }); if (!r?.ok) this.lastCompressAfter = this.stats().used; }
+          catch (e) { this.emit('log', '自动压缩失败，改为截断旧工具输出: ' + e.message); this.compact(2, 600); this.lastCompressAfter = this.stats().used; }
+        }
+        const estBefore = contextTokens(this.wire(), final ? [] : this.allTools());
         this.emit('assistant-start', { step: steps });
         const t0 = Date.now();
         let res;
@@ -131,6 +188,7 @@ class Agent {
         }
         const ms = Date.now() - t0;
         usage.calls++; usage.ms += ms;
+        if (res.usage?.prompt_tokens > 500) this.calib = Math.min(2.5, Math.max(0.4, res.usage.prompt_tokens / Math.max(1, estBefore)));
         if (res.usage) {
           usage.prompt += res.usage.prompt_tokens || 0; usage.completion += res.usage.completion_tokens || 0;
           usage.reasoning += res.usage.completion_tokens_details?.reasoning_tokens || 0; usage.cached += res.usage.prompt_tokens_details?.cached_tokens || 0;
@@ -142,6 +200,7 @@ class Agent {
         if (res.toolCalls?.length) asMsg.tool_calls = res.toolCalls.map(tc => ({ id: tc.id, type: 'function', function: { name: tc.name, arguments: tc.argError ? (tc.rawArgs || '{}') : JSON.stringify(tc.args) } }));
         if (asMsg.tool_calls) { for (const t of asMsg.tool_calls) { try { JSON.parse(t.function.arguments); } catch { t.function.arguments = '{}'; } } }
         this.messages.push(asMsg);
+        this.emitContext();
         if (final || !res.toolCalls?.length) { if (!stop) stop = 'completed'; break; }
         for (const tc of res.toolCalls) {
           if (this.abort.signal.aborted) break;
@@ -154,7 +213,7 @@ class Agent {
           }
           const text = typeof r?.text === 'string' ? r.text : JSON.stringify(r ?? '(空)');
           this.emit('tool-end', { id: tc.id, name: tc.name, text, isError: !!r?.isError, ms: Date.now() - tt });
-          this.messages.push({ role: 'tool', tool_call_id: tc.id, name: tc.name, content: (text || '(空)').slice(0, 12000) });
+          this.messages.push({ role: 'tool', tool_call_id: tc.id, name: tc.name, content: trimToolOutput(text || '(空)', { dir: this.ctxDir(), name: tc.name }) });
         }
         // 中断时补齐未执行的工具结果，避免下一轮出现缺失 tool_call_id 的 400
         const last = this.messages.filter(m => m.role === 'assistant').pop();
@@ -166,6 +225,7 @@ class Agent {
     } finally {
       this.running = false; this.abort = null; this.wrapUp = false;
       this.persist();
+      this.emitContext();
       this.emit('done', { stop, usage });
     }
   }

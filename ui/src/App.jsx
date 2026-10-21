@@ -42,6 +42,11 @@ export default function App() {
   const [rtab, setRtab] = useState('chat');
   const [launching, setLaunching] = useState({});
   const [input, setInput] = useState('');
+  // 每个会话标签独立的待发送附件（芯片）
+  const [atts, setAtts] = useState({});
+  const lastAtt = useRef({});
+  const addAtt = useCallback((s, list) => { setAtts(m => { const cur = m[s] || []; const add = (Array.isArray(list) ? list : [list]).filter(a => !cur.some(x => x.key === a.key)); return { ...m, [s]: [...cur, ...add].slice(0, 12) }; }); setRtab('chat'); }, []);
+  const rmAtt = useCallback((s, key) => setAtts(m => ({ ...m, [s]: (m[s] || []).filter(x => x.key !== key) })), []);
   const sid = sessions.focused;
   const cur = (sid && S[sid]) || blank();
   const sidRef = useRef(sid); sidRef.current = sid;
@@ -91,7 +96,8 @@ export default function App() {
       on('script', (v, s) => dispatch({ t: 'script', sid: s, v })),
       on('log', (v, s) => s && dispatch({ t: 'log', sid: s, v: String(v) })),
       on('frame', (f, s) => { if (s === sidRef.current) drawFrame(f); }),
-      on('agent-user', (c, s) => dispatch({ t: 'ev', sid: s, v: { type: 'user', content: c } })),
+      on('agent-user', (c, s) => { const a = lastAtt.current[s]; lastAtt.current[s] = null; dispatch({ t: 'ev', sid: s, v: { type: 'user', content: c, atts: a || undefined } }); }),
+      on('agent-context', (v, s) => { dispatch({ t: 'patch', sid: s, patch: { ctx: v } }); if (v?.event === 'compressed') dispatch({ t: 'ev', sid: s, v: { type: 'note', content: `上下文已${v.reason === 'auto' ? '自动' : ''}压缩 ${fmtK(v.before)} → ${fmtK(v.after)}` } }); }),
       on('agent-assistant-start', (v, s) => dispatch({ t: 'ev', sid: s, v: { type: 'assistant', content: '' } })),
       on('agent-delta', (d, s) => dispatch({ t: 'delta', sid: s, v: d })),
       on('agent-reasoning', (v, s) => dispatch({ t: 'patch', sid: s, patch: { thinking: true } })),
@@ -112,6 +118,7 @@ export default function App() {
     const patch = {}; if (s.url && /^https?:/.test(s.url)) patch.url = s.url;
     try { const ev = JSON.parse(localStorage.getItem('wdh_ev_' + s.id) || 'null'); if (Array.isArray(ev) && ev.length) patch.events = ev; } catch {}
     dispatch({ t: 'patch', sid: s.id, patch });
+    api.invoke('agent-context', { sessionId: s.id }).then(v => v && dispatch({ t: 'patch', sid: s.id, patch: { ctx: v } })).catch(() => {});
     api.invoke('get-requests', { sessionId: s.id }).then(r => r?.list?.length && dispatch({ t: 'requests', sid: s.id, v: r.list })).catch(() => {});
   } }, [sessions]);
   // 对话记录持久化（截断工具输出，避免占满存储）
@@ -210,9 +217,11 @@ export default function App() {
     if (cur.agentRunning) return;
     const text = auto ? '' : input.trim(); if (!auto && !text) return;
     if (!cur.status.running) { toast('请先在左侧打开目标网址', 'warn'); return; }
-    const r = await inv('agent-send', { text, auto });
+    const list = auto ? [] : (atts[sid] || []);
+    lastAtt.current[sid] = list.length ? list.map(a => a.label) : null;
+    const r = await inv('agent-send', { text, auto, attachments: list.map(({ key, label, ...a }) => a) });
     if (!r?.ok) { toast(r?.error || '发送失败', 'warn'); if (/API Key/.test(r?.error || '')) setRtab('settings'); return; }
-    dispatch({ t: 'patch', sid, patch: { agentRunning: true } }); if (!auto) { setInput(''); if (inputRef.current) inputRef.current.style.height = ''; }
+    dispatch({ t: 'patch', sid, patch: { agentRunning: true } }); if (!auto) { setAtts(m => ({ ...m, [sid]: [] })); setInput(''); if (inputRef.current) inputRef.current.style.height = ''; }
     setRtab('chat');
   }
   async function cleanRetry(e) {
@@ -289,9 +298,14 @@ export default function App() {
                 </button>)}
             </div>
             <div className="rbody">
-              {rtab === 'chat' && <ChatPane clear={() => { inv('agent-reset'); dispatch({ t: 'patch', sid, patch: { events: [], usage: null } }); }} cur={cur} chatRef={chatRef} input={input} setInput={setInput} inputRef={inputRef} send={send} cleanRetry={cleanRetry} inv={inv} hasKey={hasKey} goSettings={() => setRtab('settings')} />}
-              {rtab === 'evidence' && <NetworkPane key={sid} cur={cur} inv={inv} toast={toast} />}
-              {rtab === 'code' && <CodePane key={sid} sid={sid} inv={inv} toast={toast} events={cur.events} />}
+              {rtab === 'chat' && <ChatPane cur={cur} atts={atts[sid] || []} rmAtt={k => rmAtt(sid, k)} addAtt={l => addAtt(sid, l)} toast={toast}
+                ctxAct={async act => {
+                  if (act === 'compress') { const r = await inv('agent-compress'); if (!r?.ok) toast(r?.error || '压缩失败', 'warn'); }
+                  else if (act === 'clear') { await inv('agent-reset'); dispatch({ t: 'ev', sid, v: { type: 'note', content: '上下文已清空，AI 不再记得以上内容' } }); }
+                  else if (act === 'new') { await inv('agent-new-chat'); dispatch({ t: 'patch', sid, patch: { events: [], usage: null } }); }
+                }} chatRef={chatRef} input={input} setInput={setInput} inputRef={inputRef} send={send} cleanRetry={cleanRetry} inv={inv} hasKey={hasKey} goSettings={() => setRtab('settings')} />}
+              {rtab === 'evidence' && <NetworkPane key={sid} cur={cur} inv={inv} toast={toast} onAttach={l => addAtt(sid, l)} />}
+              {rtab === 'code' && <CodePane key={sid} sid={sid} inv={inv} toast={toast} events={cur.events} onAttach={l => addAtt(sid, l)} />}
               {rtab === 'settings' && <SettingsPane initial={settings} onSave={saveSettings} toast={toast} />}
             </div>
           </div>
@@ -314,7 +328,49 @@ const isApi = r => r.type === 'xhr' || r.type === 'fetch';
 function hostOf(u) { try { return new URL(u).host; } catch { return ''; } }
 function shortUrl(u) { try { const x = new URL(u); return x.host + x.pathname; } catch { return (u || '').slice(0, 60); } }
 
-function ChatPane({ clear, cur, chatRef, input, setInput, inputRef, send, cleanRetry, inv, hasKey, goSettings }) {
+const fmtK = n => n == null ? '-' : n >= 1000 ? (n / 1000).toFixed(n >= 100000 ? 0 : 1).replace(/\.0$/, '') + 'k' : String(n);
+const ATT_ICON = { page: 'globe', request: 'network', script: 'code', snippet: 'code', file: 'file' };
+
+function ContextMeter({ ctx, onAct, busy }) {
+  const [open, setOpen] = useState(false);
+  const pct = ctx ? Math.min(1, ctx.pct || 0) : 0;
+  const lvl = pct >= 0.75 ? 'hi' : pct >= 0.5 ? 'mid' : '';
+  const R = 6.5, C = 2 * Math.PI * R;
+  return <div className="menu-wrap">
+    <button className={'ctxm ' + lvl} onClick={() => setOpen(o => !o)} title={ctx ? `上下文 ${ctx.used} / ${ctx.limit} tokens（估算）· 已压缩 ${ctx.compressions} 次` : '上下文'}>
+      <svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r={R} className="trk" /><circle cx="8" cy="8" r={R} className="val" strokeDasharray={`${C * pct} ${C}`} transform="rotate(-90 8 8)" /></svg>
+      <span>{ctx?.compressing ? '压缩中' : `${fmtK(ctx?.used)} / ${fmtK(ctx?.limit)}`}</span>
+    </button>
+    {open && <div className="menu up right" onMouseLeave={() => setOpen(false)} onClick={() => setOpen(false)}>
+      <button onClick={() => onAct('compress')} disabled={busy || !ctx?.messages}>压缩上下文<span>{Math.round(pct * 100)}%</span></button>
+      <button onClick={() => onAct('clear')} disabled={busy || !ctx?.messages}>清空上下文</button>
+      <button onClick={() => onAct('new')} disabled={busy}>新对话</button>
+    </div>}
+  </div>;
+}
+
+function AttachMenu({ cur, inv, addAtt, toast }) {
+  const [open, setOpen] = useState(null);
+  const [files, setFiles] = useState([]);
+  const page = () => { const p = cur.status.pages.find(x => x.active) || cur.status.pages[0]; if (!p) return toast('浏览器未打开', 'warn'); addAtt({ key: 'page', kind: 'page', url: p.url, label: '页面 ' + (hostOf(p.url) || p.url) }); setOpen(null); };
+  const showFiles = async () => { try { const f = await inv('list-files'); setFiles(f.filter(x => !/^(scripts|\.capture|\.ctx|\.chats)\//.test(x.name) && !/^\./.test(x.name)).slice(0, 30)); } catch { setFiles([]); } setOpen('file'); };
+  return <div className="menu-wrap">
+    <button className="icon-btn" onClick={() => setOpen(o => o ? null : 'root')} title="添加上下文"><Icon n="plus" size={14} /></button>
+    {open === 'root' && <div className="menu up" onMouseLeave={() => setOpen(null)}>
+      <button onClick={page} disabled={!cur.status.running}>当前页面</button>
+      <button onClick={() => setOpen('script')} disabled={!cur.scripts.length}>脚本<span>{cur.scripts.length}</span></button>
+      <button onClick={showFiles}>工作区文件</button>
+    </div>}
+    {open === 'script' && <div className="menu up scroll" onMouseLeave={() => setOpen(null)}>
+      {cur.scripts.slice(-30).reverse().map(s => <button key={s.id} onClick={() => { addAtt({ key: 's:' + s.id, kind: 'script', id: s.id, label: s.id + ' ' + (s.url.split('?')[0].split('/').pop() || 'script') }); setOpen(null); }}>{(s.url.split('?')[0].split('/').pop() || s.url).slice(0, 36)}<span>{s.id}</span></button>)}
+    </div>}
+    {open === 'file' && <div className="menu up scroll" onMouseLeave={() => setOpen(null)}>
+      {files.length ? files.map(f => <button key={f.name} onClick={() => { addAtt({ key: 'f:' + f.name, kind: 'file', file: f.name, label: f.name.split('/').pop() }); setOpen(null); }}>{f.name.slice(-40)}</button>) : <button disabled>暂无文件</button>}
+    </div>}
+  </div>;
+}
+
+function ChatPane({ cur, atts, rmAtt, addAtt, toast, ctxAct, chatRef, input, setInput, inputRef, send, cleanRetry, inv, hasKey, goSettings }) {
   return <div className="chat">
     <div className="chat-scroll" ref={chatRef}>
       {!hasKey && <div className="callout warn"><Icon n="info" size={14} />尚未配置模型 API Key。<button className="linkbtn" onClick={goSettings}>去设置</button></div>}
@@ -324,6 +380,7 @@ function ChatPane({ clear, cur, chatRef, input, setInput, inputRef, send, cleanR
       {cur.agentRunning && <div className="typing"><span /><span /><span />{cur.thinking ? '思考中' : '执行中'}</div>}
     </div>
     <div className="composer">
+      {atts.length > 0 && <div className="att-chips">{atts.map(a => <span key={a.key} className="att" title={a.label}><Icon n={ATT_ICON[a.kind] || 'file'} size={11} /><span className="t">{a.label}</span><button onClick={() => rmAtt(a.key)} title="移除"><Icon n="x" size={10} /></button></span>)}</div>}
       <textarea ref={inputRef} value={input} rows={1} onChange={e => { setInput(e.target.value); e.target.style.height = 'auto'; e.target.style.height = Math.min(160, e.target.scrollHeight) + 'px'; }}
         onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(false); } }}
         placeholder={cur.agentRunning ? 'AI 正在分析…' : '描述要分析的参数（Enter 发送，Shift+Enter 换行）'} disabled={cur.agentRunning} />
@@ -334,9 +391,10 @@ function ChatPane({ clear, cur, chatRef, input, setInput, inputRef, send, cleanR
         </> : <>
           <button className="btn btn-sm" onClick={() => send(true)} disabled={!cur.status.running}><Icon n="sparkles" size={12} />自动分析</button>
           <button className="btn-ghost btn-sm" onClick={cleanRetry} disabled={!cur.status.running} title="清站点数据后重新分析（Shift：全新 Profile）"><Icon n="broom" size={12} />干净重试</button>
-          <button className="btn-ghost btn-sm" onClick={clear} disabled={!cur.events.length} title="清空对话上下文"><Icon n="x" size={12} />清空</button>
         </>}
         <span className="grow" />
+        {!cur.agentRunning && <AttachMenu cur={cur} inv={inv} addAtt={addAtt} toast={toast} />}
+        <ContextMeter ctx={cur.ctx} onAct={ctxAct} busy={cur.agentRunning || cur.ctx?.compressing} />
         <button className="btn-primary btn-icon send" onClick={() => send(false)} disabled={cur.agentRunning || !input.trim() || !cur.status.running} title="发送"><Icon n="send" size={14} /></button>
       </div>
     </div>
@@ -345,7 +403,7 @@ function ChatPane({ clear, cur, chatRef, input, setInput, inputRef, send, cleanR
 
 function EventView({ e }) {
   const [open, setOpen] = useState(false);
-  if (e.type === 'user') return <div className="msg user"><div className="bubble">{e.content || '一键自动分析'}</div></div>;
+  if (e.type === 'user') return <div className="msg user"><div className="bubble">{e.content || '一键自动分析'}{e.atts?.length > 0 && <div className="att-chips in">{e.atts.map((l, i) => <span key={i} className="att"><span className="t">{l}</span></span>)}</div>}</div></div>;
   if (e.type === 'assistant') return e.content ? <div className="msg assistant"><div className="bubble"><Markdown text={e.content} /></div></div> : null;
   if (e.type === 'error') return <div className="callout err"><Icon n="info" size={14} />{e.content}</div>;
   if (e.type === 'note') return <div className="callout"><Icon n="info" size={14} />{e.content}</div>;
@@ -364,7 +422,7 @@ function EventView({ e }) {
 }
 function argBrief(a) { if (!a) return ''; const v = a.url || a.names || a.expression || a.pattern || a.query || a.file || a.urlPattern || a.code || a.ids || ''; return String(Array.isArray(v) ? v.join(',') : v).replace(/\s+/g, ' ').slice(0, 60); }
 
-function CodePane({ sid, inv, toast, events }) {
+function CodePane({ sid, inv, toast, events, onAttach }) {
   const [files, setFiles] = useState([]);
   const [sel, setSel] = useState(null);
   const [content, setContent] = useState('');
@@ -381,7 +439,7 @@ function CodePane({ sid, inv, toast, events }) {
     </div>
     <div className="file-view">
       {sel ? <>
-        <div className="fv-h"><span>{sel}</span><button className="btn btn-sm" onClick={() => { navigator.clipboard?.writeText(content); toast('已复制', 'ok'); }}><Icon n="copy" size={12} />复制</button></div>
+        <div className="fv-h"><span>{sel}</span><button className="btn btn-sm" onClick={() => { const t = String(window.getSelection?.() || '').trim(); if (t) onAttach({ key: 'snip:' + sel + ':' + t.length + ':' + t.slice(0, 20), kind: 'snippet', text: t, label: '片段 ' + sel.split('/').pop() + ` (${t.split('\n').length} 行)` }); else onAttach({ key: 'f:' + sel, kind: 'file', file: sel, label: sel.split('/').pop() }); }} title="选中文字则发送片段，否则发送整个文件"><Icon n="sparkles" size={12} />发给 AI</button><button className="btn btn-sm" onClick={() => { navigator.clipboard?.writeText(content); toast('已复制', 'ok'); }}><Icon n="copy" size={12} />复制</button></div>
         {/\.md$/.test(sel) ? <div className="report-md"><Markdown text={content} /></div> : <pre className="codearea"><code>{content}</code></pre>}
       </> : <EmptyState icon="code" title="暂无导出" />}
     </div>

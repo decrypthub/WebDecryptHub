@@ -37,7 +37,7 @@ function toPython(d) {
   return lines.join('\n');
 }
 
-export function NetworkPane({ cur, inv, toast }) {
+export function NetworkPane({ cur, inv, toast, onAttach }) {
   const [q, setQ] = useState('');
   const [tg, setTg] = useState('api');
   const [onlySig, setOnlySig] = useState(false);
@@ -77,6 +77,7 @@ export function NetworkPane({ cur, inv, toast }) {
       <button className={'chip-btn ' + (onlySig ? 'on' : '')} onClick={() => setOnlySig(v => !v)} title="只看携带疑似签名参数的请求"><Icon n="key" size={12} />签名</button>
       <button className={'icon-btn ' + (paused ? 'warn' : '')} onClick={async () => setPaused(await inv('net-pause', { paused: !paused }))} title={paused ? '继续抓包' : '暂停抓包'}><Icon n={paused ? 'play' : 'pause'} size={12} /></button>
       <button className="icon-btn" onClick={() => { inv('clear-requests'); setSel(null); setChecked(new Set()); }} title="清空"><Icon n="broom" size={13} /></button>
+      <button className="btn btn-sm" disabled={!checked.size && !sel} onClick={() => { const ids = checked.size ? [...checked] : [sel]; onAttach?.(ids.map(id => { const r = all.find(x => x.id === id); return { key: 'r:' + id, kind: 'request', id, label: `${id} ${r?.method || ''} ${shortPath(r?.url)}` }; })); }} title="把选中请求加入 AI 对话上下文"><Icon n="sparkles" size={12} />发给 AI{checked.size > 1 ? ' ' + checked.size : ''}</button>
       <div className="menu-wrap">
         <button className="btn btn-sm" onClick={() => setMenu(m => !m)}><Icon n="download" size={12} />HAR<Icon n="chevdown" size={11} /></button>
         {menu && <div className="menu" onMouseLeave={() => setMenu(false)}>
@@ -88,7 +89,7 @@ export function NetworkPane({ cur, inv, toast }) {
     </>}
   </div>;
 
-  if (mode === 'js') return <div className="nw">{toolbar}<ScriptList cur={cur} q={q} inv={inv} script={script} setScript={setScript} /></div>;
+  if (mode === 'js') return <div className="nw">{toolbar}<ScriptList cur={cur} q={q} inv={inv} script={script} setScript={setScript} onAttach={onAttach} /></div>;
 
   return <div className="nw">
     {toolbar}
@@ -120,12 +121,13 @@ export function NetworkPane({ cur, inv, toast }) {
   </div>;
 }
 
-function ScriptList({ cur, q, inv, script, setScript }) {
+function shortPath(u) { try { const x = new URL(u); return (x.pathname.split('/').filter(Boolean).pop() || x.host).slice(0, 28); } catch { return ''; } }
+function ScriptList({ cur, q, inv, script, setScript, onAttach }) {
   const list = cur.scripts.filter(s => !q || s.url.toLowerCase().includes(q.toLowerCase()));
   return <PanelGroup direction="vertical" autoSaveId="wdh-js">
     <Panel defaultSize={40} minSize={15}><div className="nw-list">{list.length ? list.slice().reverse().map(s => <div key={s.id} className={'nw-row js ' + (script?.id === s.id ? 'sel' : '')} onClick={async () => { setScript({ ...s, content: '加载中…' }); setScript({ ...s, content: await inv('read-file', { file: s.file }) }); }}><span className="tag-badge">{s.id}</span><span className="nm"><b>{splitUrl(s.url).name}</b><i>{splitUrl(s.url).host}</i></span><span className="r">{fmtSize(s.size)}</span></div>) : <EmptyState icon="code" title="暂无脚本" />}</div></Panel>
     <PanelResizeHandle className="resize-handle h" />
-    <Panel minSize={20}>{script ? <pre className="codearea">{String(script.content).slice(0, 200000)}</pre> : <EmptyState icon="code" title="选择脚本查看源码" />}</Panel>
+    <Panel minSize={20}>{script ? <div className="js-view"><div className="fv-h"><span>{splitUrl(script.url).name}</span><button className="btn btn-sm" onClick={() => { const t = String(window.getSelection?.() || '').trim(); onAttach?.(t ? { key: 'snip:' + script.id + ':' + t.length, kind: 'snippet', text: t, label: `片段 ${script.id}` } : { key: 's:' + script.id, kind: 'script', id: script.id, label: script.id + ' ' + splitUrl(script.url).name }); }} title="选中文字则发送片段，否则发送整个脚本引用"><Icon n="sparkles" size={12} />发给 AI</button></div><pre className="codearea">{String(script.content).slice(0, 200000)}</pre></div> : <EmptyState icon="code" title="选择脚本查看源码" />}</Panel>
   </PanelGroup>;
 }
 

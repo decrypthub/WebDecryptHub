@@ -60,11 +60,13 @@ async function startServer() {
       const chromes = chromeMod.findChrome(settingsMod.userDataDir(), settings.chromePath);
       return { runtime: runtimeInfo, chrome: chromes, chromeOk: chromes.length > 0, downloading: !!downloading, version: process.env.JSRA_APP_VERSION || '' };
     },
+    'kernel-info': () => ({ bundled: chromeMod.bundledInfo(settingsMod.userDataDir()), system: chromeMod.findChrome(null, settings.chromePath)[0] || null, kernel: settings.kernel, downloading: !!downloading }),
+    'kernel-delete': async () => { if (downloading) return { ok: false, error: '下载中' }; for (const s of sessions.sessions.values()) if (s.browser.running && settings.kernel === 'bundled') await s.closeBrowser().catch(() => {}); chromeMod.deleteBundled(settingsMod.userDataDir()); if (settings.kernel === 'bundled') { settings.kernel = 'system'; settingsMod.save(settings); } return { ok: true }; },
     'find-chrome': () => chromeMod.findChrome(settingsMod.userDataDir(), settings.chromePath),
     'download-chrome': async () => {
       if (downloading) return downloading;
       downloading = (async () => {
-        try { const r = await chromeMod.downloadCft(settingsMod.userDataDir(), p => broadcast('download-progress', p)); settings.chromePath = r.path; settingsMod.save(settings); return { ok: true, ...r }; }
+        try { const r = await chromeMod.downloadCft(settingsMod.userDataDir(), p => broadcast('download-progress', p)); if (!chromeMod.findChrome(null, settings.chromePath).length) { settings.kernel = 'bundled'; settingsMod.save(settings); } return { ok: true, ...r }; }
         catch (e) { return { ok: false, error: e.message }; }
         finally { setTimeout(() => { downloading = null; }, 0); }
       })();
@@ -108,7 +110,10 @@ async function startServer() {
     'agent-send': a => S(a).send(a),
     'agent-interrupt': a => { S(a).agent?.interrupt(); return true; },
     'agent-wrapup': a => { S(a).agent?.finishSoon(); return true; },
-    'agent-reset': a => { const s = S(a); if (s.agent) s.agent.reset(); else { try { fs.rmSync(path.join(s.projectDir, '.agent-history.json'), { force: true }); } catch {} } return true; },
+    'agent-reset': a => { S(a).ensureAgent().reset(); return true; },
+    'agent-new-chat': a => { const s = S(a); if (s.agent?.running) return false; s.ensureAgent().newChat(); return true; },
+    'agent-context': a => S(a).ensureAgent().stats(),
+    'agent-compress': async a => { const s = S(a); const ag = s.ensureAgent(); if (ag.running) return { ok: false, error: 'AI 运行中，将在接近上限时自动压缩' }; try { return await ag.compress({ reason: 'manual' }); } catch (e) { return { ok: false, error: e.message }; } },
     'test-connection': async (override) => {
       const { testConnection } = await import('./llm.mjs');
       const merged = override ? { ...settings, ...override, openai: { ...settings.openai, ...(override.openai || {}) }, anthropic: { ...settings.anthropic, ...(override.anthropic || {}) } } : settings;

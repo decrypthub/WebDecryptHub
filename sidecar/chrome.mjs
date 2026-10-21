@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 
 function candidates() {
   const p = process.platform;
@@ -73,15 +74,22 @@ async function downloadCft(userData, onProgress = () => {}) {
       const r = await fetchT(url, 60000);
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const total = Number(r.headers.get('content-length')) || 0;
+      // 官方源(GCS)响应头 x-goog-hash 带 md5，用于完整性校验；镜像源只校验大小
+      const goog = String(r.headers.get('x-goog-hash') || '');
+      const wantMd5 = (goog.match(/md5=([^,]+)/) || [])[1] || '';
+      const md5 = crypto.createHash('md5'), sha = crypto.createHash('sha256');
       const out = fs.createWriteStream(zipPath);
       let got = 0, last = 0;
       for await (const chunk of r.body) {
-        got += chunk.length;
+        got += chunk.length; md5.update(chunk); sha.update(chunk);
         if (!out.write(chunk)) await new Promise(ok => out.once('drain', ok));
         if (Date.now() - last > 250) { last = Date.now(); onProgress({ phase: 'download', source: src, got, total, version: stable.version }); }
       }
       await new Promise(ok => out.end(ok));
       if (total && got !== total) throw new Error(`下载不完整 ${got}/${total}`);
+      if (got < 50e6) throw new Error(`文件过小 ${got} 字节，疑似错误页`);
+      const md5b64 = md5.digest('base64'), sha256 = sha.digest('hex');
+      if (wantMd5 && wantMd5 !== md5b64) throw new Error('MD5 校验失败');
       onProgress({ phase: 'extract', source: src, got, total, version: stable.version });
       const extract = (await import('extract-zip')).default;
       fs.rmSync(path.join(dir, 'chrome-' + plat), { recursive: true, force: true });
@@ -90,11 +98,31 @@ async function downloadCft(userData, onProgress = () => {}) {
       const exe = cftExecutable(userData);
       if (!fs.existsSync(exe)) throw new Error('解压后未找到 ' + exe);
       if (process.platform !== 'win32') { try { fs.chmodSync(exe, 0o755); } catch {} }
+      const info = { kernel: 'chrome-for-testing', version: stable.version, platform: plat, source: src, url, size: got, sha256, md5Verified: !!wantMd5, path: exe, downloadedAt: new Date().toISOString() };
+      fs.writeFileSync(path.join(dir, 'kernel.json'), JSON.stringify(info, null, 2));
       onProgress({ phase: 'done', source: src, got, total, version: stable.version });
-      return { path: exe, version: stable.version, source: src };
+      return info;
     } catch (e) { lastErr = `${src}：${e.message}`; try { fs.rmSync(zipPath, { force: true }); } catch {} }
   }
   throw new Error('下载失败（已尝试官方源与国内镜像）。' + lastErr + '。也可手动安装 Chrome/Edge 后在设置中指定路径。');
 }
 
-export { findChrome, downloadCft, cftExecutable };
+// 内置内核信息（已下载才有）
+function bundledInfo(userData) {
+  const exe = cftExecutable(userData);
+  if (!fs.existsSync(exe)) return null;
+  let meta = {}; try { meta = JSON.parse(fs.readFileSync(path.join(cftDir(userData), 'kernel.json'), 'utf8')); } catch {}
+  let bytes = 0; try { for (const f of fs.readdirSync(cftDir(userData), { recursive: true })) { try { const st = fs.statSync(path.join(cftDir(userData), String(f))); if (st.isFile()) bytes += st.size; } catch {} } } catch {}
+  return { ...meta, path: exe, installed: true, diskBytes: bytes };
+}
+function deleteBundled(userData) { fs.rmSync(cftDir(userData), { recursive: true, force: true }); return true; }
+// 按内核设置选择可执行文件：bundled 只用下载的内核；system 保持原逻辑（自定义路径 → 系统 Chrome/Edge → 已下载内核兜底）
+function resolveKernel(userData, settings) {
+  if (settings?.kernel === 'bundled') {
+    const b = bundledInfo(userData);
+    return b ? [{ path: b.path, source: '内置 Chromium ' + (b.version || '') }] : [];
+  }
+  return findChrome(userData, settings?.chromePath);
+}
+
+export { findChrome, downloadCft, cftExecutable, bundledInfo, deleteBundled, resolveKernel };

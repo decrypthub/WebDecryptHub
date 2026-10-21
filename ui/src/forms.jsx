@@ -43,7 +43,7 @@ function ChromeBlock({ s, up, toast, compact }) {
     setErr(''); setDl({ phase: 'download', got: 0, total: 0 });
     const r = await window.api.invoke('download-chrome').catch(e => ({ ok: false, error: e.message }));
     setDl(null);
-    if (r.ok) { up && up('chromePath', r.path); toast?.(`浏览器已就绪（${r.version}，来源：${r.source}）`, 'ok'); refresh(); }
+    if (r.ok) { if (!chromes?.length) up && up('kernel', 'bundled'); toast?.(`浏览器已就绪（${r.version}，来源：${r.source}）`, 'ok'); refresh(); }
     else setErr(r.error);
   }
   const pct = dl && dl.total ? Math.round(dl.got / dl.total * 100) : null;
@@ -58,6 +58,44 @@ function ChromeBlock({ s, up, toast, compact }) {
   </div>;
 }
 
+// 浏览器内核：系统 Chrome（默认）/ 按需下载的内置 Chromium（Chrome for Testing）
+function KernelBlock({ s, up, toast }) {
+  const [info, setInfo] = useState(null);
+  const [dl, setDl] = useState(null);
+  const [err, setErr] = useState('');
+  const refresh = () => window.api.invoke('kernel-info').then(setInfo).catch(() => setInfo({}));
+  useEffect(() => { refresh(); return window.api.on('download-progress', p => setDl(p.phase === 'done' ? null : p)); }, []);
+  const k = s.kernel || 'system', b = info?.bundled;
+  async function download() {
+    setErr(''); setDl({ phase: 'download', got: 0, total: 0 });
+    const r = await window.api.invoke('download-chrome').catch(e => ({ ok: false, error: e.message }));
+    setDl(null); refresh();
+    if (r.ok) { up('kernel', 'bundled'); toast?.(`内置 Chromium ${r.version} 已就绪`, 'ok'); } else setErr(r.error);
+  }
+  async function del() {
+    if (!window.confirm('删除已下载的内置 Chromium？使用它的浏览器会被关闭。')) return;
+    await window.api.invoke('kernel-delete'); if (k === 'bundled') up('kernel', 'system'); refresh();
+  }
+  const pct = dl && dl.total ? Math.round(dl.got / dl.total * 100) : null;
+  return <>
+    <div className="field"><label>浏览器内核</label>
+      <div className="seg-ctl sm"><button className={k === 'system' ? 'on' : ''} onClick={() => up('kernel', 'system')}>系统 Chrome</button><button className={k === 'bundled' ? 'on' : ''} onClick={() => up('kernel', 'bundled')}>内置 Chromium</button></div>
+    </div>
+    {k === 'system' ? <>
+      <div className="field"><label>Chrome / Edge 路径</label><input value={s.chromePath || ''} onChange={e => up('chromePath', e.target.value)} placeholder="留空自动检测" spellCheck={false} /></div>
+      <div className="chromeblk">{info === null ? <div className="hint">检测中…</div> : info.system ? <div className="okline"><Icon n="check" size={13} />{info.system.source} · <span className="mono">{info.system.path}</span></div> : <div className="warnline"><Icon n="info" size={13} />未检测到系统 Chrome / Edge</div>}</div>
+    </> : <div className="chromeblk">
+      {b ? <div className="okline kline"><Icon n="check" size={13} /><span>Chrome for Testing {b.version || ''} · {(b.diskBytes / 1e6).toFixed(0)} MB{b.sha256 ? <> · <span className="mono" title={b.sha256}>sha256 {b.sha256.slice(0, 12)}</span></> : ''}{b.md5Verified ? ' · MD5 已校验' : ''}</span><span className="grow" /><button className="btn-ghost btn-sm" onClick={del} disabled={!!dl}><Icon n="x" size={11} />删除</button></div>
+        : !dl && <div className="warnline"><Icon n="info" size={13} />未下载（约 170 MB，存放于应用数据目录）</div>}
+      {dl ? <div className="progress"><div className="bar"><div style={{ width: (pct ?? 8) + '%' }} className={pct == null ? 'indet' : ''} /></div>
+        <span>{dl.phase === 'extract' ? '解压中…' : `${pct != null ? pct + '% · ' : ''}${(dl.got / 1e6).toFixed(0)}${dl.total ? '/' + (dl.total / 1e6).toFixed(0) : ''} MB`}</span></div>
+        : !b && <button className="btn-primary btn-sm" onClick={download}><Icon n="download" size={12} />下载内置 Chromium</button>}
+      {b && !dl && <button className="btn btn-sm" onClick={download}><Icon n="reload" size={12} />重新下载 / 更新</button>}
+      {err && <div className="testmsg err">{err}</div>}
+    </div>}
+  </>;
+}
+
 export function SettingsPane({ initial, onSave, toast }) {
   const [s, setS] = useState(initial);
   const up = deepUp(setS);
@@ -67,8 +105,7 @@ export function SettingsPane({ initial, onSave, toast }) {
   return <div className="settings">
     <section><h3>AI 模型</h3><ProviderFields s={s} up={up} /><TestButton s={s} /></section>
     <section><h3>浏览器</h3>
-      <div className="field"><label>Chrome / Edge 路径</label><input value={s.chromePath || ''} onChange={e => up('chromePath', e.target.value)} placeholder="留空自动检测" spellCheck={false} /></div>
-      <ChromeBlock s={s} up={up} toast={toast} />
+      <KernelBlock s={s} up={up} toast={toast} />
       <div className="row2">
         <div className="field"><label>主会话登录态</label><div className="seg-ctl sm"><button className={!s.isolated ? 'on' : ''} onClick={() => up('isolated', false)}>保留</button><button className={s.isolated ? 'on' : ''} onClick={() => up('isolated', true)}>每次全新</button></div></div>
         <div className="field"><label>显示模式</label><div className="seg-ctl sm"><button className={!s.headless ? 'on' : ''} onClick={() => up('headless', false)}>有头（推荐）</button><button className={s.headless ? 'on' : ''} onClick={() => up('headless', true)}>无头</button></div></div>
@@ -81,6 +118,7 @@ export function SettingsPane({ initial, onSave, toast }) {
     <section><h3>分析</h3>
       <div className="row2">
         <div className="field"><label>最大步数</label><input type="number" min="5" max="200" value={s.maxSteps} onChange={e => up('maxSteps', +e.target.value)} /></div>
+        <div className="field"><label>上下文窗口</label><input type="number" min="0" step="1000" value={s.contextWindow || ''} placeholder="自动（按模型）" onChange={e => up('contextWindow', +e.target.value || 0)} /><div className="hint">tokens，用量达 75% 自动压缩</div></div>
         <div className="field"><label>温度</label><input type="number" step="0.1" min="0" max="1" value={s.temperature} onChange={e => up('temperature', +e.target.value)} /></div>
       </div>
     </section>

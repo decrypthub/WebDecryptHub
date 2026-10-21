@@ -43,14 +43,14 @@ class Session {
     this.launching = (async () => {
       try {
         const settings = this.mgr.getSettings();
-        const found = this.mgr.chromeMod.findChrome(this.mgr.userDataDir, settings.chromePath);
-        if (!found.length) return { ok: false, needChrome: true, error: '未找到 Chrome/Edge，请在首次运行向导中下载浏览器，或在设置中指定路径' };
+        const found = this.mgr.chromeMod.resolveKernel(this.mgr.userDataDir, settings);
+        if (!found.length) return { ok: false, needChrome: true, error: settings.kernel === 'bundled' ? '尚未下载内置 Chromium，请在「设置 → 浏览器内核」中下载，或切换为系统 Chrome' : '未找到 Chrome/Edge，请在首次运行向导中下载浏览器，或在设置中指定路径' };
         const exe = found[0].path;
         await this.mcp.stop();
         await this.browser.launch({ executablePath: exe, headless: settings.headless, profileDir: this.profileDir(), isolated: isolated ?? (this.primary ? settings.isolated : true), projectDir: this.projectDir, proxy: settings.proxy, embed: wantEmbed(settings) });
         await this.mcp.start({ cdpPort: this.browser.cdpPort, allowedRoot: this.projectDir });
-        const prev = this.agent;
-        if (!prev) { this.agent = new Agent({ mcp: this.mcp, browser: this.browser, projectDir: this.projectDir, getSettings: this.mgr.getSettings, emit: (ev, p) => { this.emit('agent-' + ev, p); if (ev === 'done' || ev === 'user') this.mgr.emitList(); }, relaunch: o => this.relaunch(o) }); this.agent.restore(); }
+        this.ensureAgent();
+        this.agent.emitContext(); // 工具清单变化（MCP 已连接）→ 刷新用量
         if (this.mgr.focusedId === this.id) await this.browser.startScreencast().catch(() => {});
         if (settings.antiDebug) { try { const { ANTIDEBUG_TOOLS } = await import('./antidebug.mjs'); await ANTIDEBUG_TOOLS[0].run({}, this.toolCtx()); this.emit('log', '已按设置启用反调试绕过'); } catch (e) { this.emit('log', '反调试启用失败: ' + e.message); } }
         try { await this.browser.injector.armAll(); } catch {}
@@ -62,6 +62,11 @@ class Session {
     })();
     return this.launching;
   }
+  // 对话历史与浏览器解耦：未打开浏览器也能查看用量、压缩、清空（每个会话标签独立，落盘到项目目录）
+  ensureAgent() {
+    if (!this.agent) { this.agent = new Agent({ mcp: this.mcp, browser: this.browser, projectDir: this.projectDir, getSettings: this.mgr.getSettings, emit: (ev, p) => { this.emit('agent-' + ev, p); if (ev === 'done' || ev === 'user') this.mgr.emitList(); }, relaunch: o => this.relaunch(o) }); this.agent.restore(); }
+    return this.agent;
+  }
   async relaunch({ isolated = true, url } = {}) {
     const r = await this.launch({ isolated, url: undefined });
     if (!r.ok) throw new Error(r.error);
@@ -69,13 +74,13 @@ class Session {
     if (url && /^https?:/.test(url)) { await this.browser.navigate(url); await new Promise(r => setTimeout(r, 6000)); }
     return { profileDir: this.browser.profileDir, requests: this.browser.requests.length, toolCount: r.toolCount };
   }
-  send({ text, auto, maxSteps, tokenBudget }) {
+  send({ text, auto, maxSteps, tokenBudget, attachments }) {
     if (!this.browser.running || !this.agent) return { ok: false, error: '请先打开浏览器' };
     if (this.agent.running) return { ok: false, error: '该会话的 AI 正在运行，请等待或先中断' };
     const s = this.mgr.getSettings(); const key = s.provider === 'anthropic' ? s.anthropic.apiKey : s.openai.apiKey;
     if (!key) return { ok: false, error: '尚未配置 API Key，请在「设置」页填写' };
     this.lastGoal = { text, auto };
-    this.agent.send(text, { auto, maxSteps, tokenBudget }).catch(e => this.emit('agent-error', e.message));
+    this.agent.send(text, { auto, maxSteps, tokenBudget, attachments }).catch(e => this.emit('agent-error', e.message));
     return { ok: true };
   }
   async closeBrowser() { this.agent?.interrupt(); await this.mcp.stop(); await this.browser.close(); this.mgr.emitList(); }

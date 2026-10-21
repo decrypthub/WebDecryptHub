@@ -465,3 +465,24 @@ pre.raw { margin: 0; padding: 8px 10px; font-family: var(--font-mono); font-size
 
 /* 原生嵌入：Chrome 子窗口覆盖在此区域之上 */
 .embed-slot { width: 100%; height: 100%; background: var(--bg); display: grid; place-items: center; color: var(--text-3); font-size: var(--fs-sm); }
+
+/* AI 对话：上下文用量 / 附件芯片 */
+.att-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 2px 8px; }
+.att-chips.in { padding: 8px 0 0; }
+.att { display: inline-flex; align-items: center; gap: 5px; max-width: 220px; font-size: var(--fs-xs); padding: 3px 4px 3px 8px; border-radius: var(--r-sm); background: var(--bg-3); border: 1px solid var(--border); color: var(--text-2); }
+.att-chips.in .att { padding: 2px 8px; background: transparent; }
+.att .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att button { background: transparent; border: none; color: var(--text-3); padding: 1px; display: grid; place-items: center; border-radius: 3px; }
+.att button:hover { color: var(--text); background: var(--bg-hover); }
+.ctxm { display: inline-flex; align-items: center; gap: 6px; background: transparent; border: 1px solid transparent; color: var(--text-3); font-size: var(--fs-xs); font-family: var(--font-mono); padding: 3px 7px; border-radius: var(--r-sm); }
+.ctxm:hover { border-color: var(--border); color: var(--text-2); }
+.ctxm .trk { fill: none; stroke: var(--border-2); stroke-width: 2.2; }
+.ctxm .val { fill: none; stroke: var(--text-3); stroke-width: 2.2; stroke-linecap: round; transition: stroke-dasharray .3s; }
+.ctxm.mid .val { stroke: var(--warn); } .ctxm.hi .val { stroke: var(--accent); } .ctxm.hi { color: var(--accent); }
+.menu.up { top: auto; bottom: calc(100% + 4px); left: 0; right: auto; }
+.menu.up.right { left: auto; right: 0; }
+.menu.scroll { max-height: 280px; overflow-y: auto; min-width: 240px; }
+.js-view { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.js-view .codearea { flex: 1; min-height: 0; }
+.fv-h { gap: 6px; } .fv-h > span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kline { display: flex; align-items: center; gap: 6px; } .kline .grow { flex: 1; }
