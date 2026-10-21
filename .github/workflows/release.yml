@@ -2,7 +2,8 @@ name: Release
 
 on:
   push:
-    tags: ['v*']
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
@@ -11,22 +12,27 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: npm
 
-      - uses: oven-sh/setup-bun@v2
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
       - name: UI build
+        shell: bash
         run: |
           npm ci
           npm run build:ui
@@ -34,19 +40,26 @@ jobs:
       - name: Sidecar Windows compile
         shell: bash
         run: |
-          cd sidecar && npm ci && cd ..
+          set -euo pipefail
+          # isolated-vm ships prebuilds; full native rebuild often fails on CI Node ABIs
+          (cd sidecar && npm ci --ignore-scripts)
           bun scripts/build-sidecar.mjs win
-          mkdir -p build
           test -f build/jsra-sidecar.exe
+          # tauri.conf.json lists both platform sidecars as resources — stub the unused one
+          if [ ! -f build/jsra-sidecar-linux ]; then
+            printf 'stub\n' > build/jsra-sidecar-linux
+          fi
 
-      - name: Bundle Node win-x64 into resources (for installer payload helpers)
+      - name: Bundle Node win-x64 into resources
         shell: bash
         run: |
+          set -euo pipefail
           NODE_VER=v20.18.1
           curl -fsSL "https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-win-x64.zip" -o node.zip
           powershell -Command "Expand-Archive -Path node.zip -DestinationPath nodepack -Force"
           mkdir -p src-tauri/resources/node
           cp -a "nodepack/node-${NODE_VER}-win-x64/." src-tauri/resources/node/
+          test -f src-tauri/resources/node/node.exe
 
       - name: Tauri build (NSIS + updater artifacts)
         shell: bash
@@ -54,50 +67,85 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY secret is missing" >&2
+            exit 1
+          fi
           npm i -D @tauri-apps/cli@2
           npx tauri build --bundles nsis
 
       - name: Package dist + latest.json
         shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           VER="${GITHUB_REF_NAME#v}"
           mkdir -p dist
           NSIS=$(find src-tauri/target/release/bundle/nsis -type f -name '*.exe' | head -1)
           test -n "$NSIS"
-          cp "$NSIS" "dist/WebDecryptHub-${VER}-win-x64-setup.exe"
+          SETUP="WebDecryptHub-${VER}-win-x64-setup.exe"
+          cp "$NSIS" "dist/${SETUP}"
+
+          # Prefer Tauri updater zip + signature (createUpdaterArtifacts)
           UPD=$(find src-tauri/target/release/bundle -type f -name '*nsis.zip' | head -1 || true)
           SIG=$(find src-tauri/target/release/bundle -type f -name '*nsis.zip.sig' | head -1 || true)
-          if [ -z "$UPD" ]; then
-            # Fallback: sign the setup exe for updater consumers that accept exe
-            UPD="$NSIS"
-            npx tauri signer sign -f "$UPD" || npx tauri signer sign "$UPD"
+          if [ -z "$UPD" ] || [ -z "$SIG" ]; then
+            echo "Updater zip/sig missing; signing setup.exe as fallback"
+            UPD="dist/${SETUP}"
+            npx tauri signer sign "$UPD"
             SIG="${UPD}.sig"
+            test -f "$SIG"
+            UPD_BASENAME="$SETUP"
+          else
+            UPD_BASENAME=$(basename "$UPD")
+            cp "$UPD" "dist/${UPD_BASENAME}"
+            cp "$SIG" "dist/${UPD_BASENAME}.sig"
+            SIG="dist/${UPD_BASENAME}.sig"
           fi
-          cp "$UPD" "dist/$(basename "$UPD")"
-          cp "$SIG" "dist/$(basename "$SIG")"
-          FNAME=$(basename "$UPD")
+
           SIGTEXT=$(tr -d '\r\n' < "$SIG")
           BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
-          export VER FNAME BASE SIGTEXT
+          export VER UPD_BASENAME BASE SIGTEXT
+          # Indent Python with the run block so the YAML literal stays valid;
+          # the YAML parser strips the common indent before bash sees it.
           python - <<'PY'
-import json, os, datetime, pathlib
-ver, fname, base, sig = os.environ["VER"], os.environ["FNAME"], os.environ["BASE"], os.environ["SIGTEXT"]
-doc = {
-  "version": ver,
-  "notes": f"WebDecryptHub {ver}",
-  "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-  "platforms": {
-    "windows-x86_64": {"signature": sig, "url": f"{base}/{fname}"}
-  },
-}
-pathlib.Path("dist/latest.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-print("latest.json ->", doc["platforms"]["windows-x86_64"]["url"])
-PY
-          sha256sum dist/* > dist/SHA256SUMS.txt || shasum -a 256 dist/* > dist/SHA256SUMS.txt
+          import json, os, datetime, pathlib
+          ver = os.environ["VER"]
+          fname = os.environ["UPD_BASENAME"]
+          base = os.environ["BASE"]
+          sig = os.environ["SIGTEXT"]
+          doc = {
+            "version": ver,
+            "notes": f"WebDecryptHub {ver}",
+            "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "platforms": {
+              "windows-x86_64": {"signature": sig, "url": f"{base}/{fname}"},
+            },
+          }
+          pathlib.Path("dist/latest.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+          print("latest.json ->", doc["platforms"]["windows-x86_64"]["url"])
+          PY
+
+          # Checksums (Git Bash on windows-latest may lack sha256sum)
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum * > SHA256SUMS.txt)
+          else
+            (cd dist && for f in *; do [ "$f" = SHA256SUMS.txt ] && continue; printf '%s  %s\n' "$(powershell -NoProfile -Command "(Get-FileHash -Algorithm SHA256 -Path '$f').Hash.ToLower()")" "$f"; done > SHA256SUMS.txt)
+          fi
+          ls -la dist
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           generate_release_notes: true
+          files: |
+            dist/WebDecryptHub-*-win-x64-setup.exe
+            dist/*.sig
+            dist/*.zip
+            dist/latest.json
+            dist/SHA256SUMS.txt

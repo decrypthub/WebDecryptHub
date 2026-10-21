@@ -9,18 +9,21 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: npm
 
-      - uses: oven-sh/setup-bun@v2
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
-      - name: Install Rust
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Linux WebKit deps
@@ -35,10 +38,17 @@ jobs:
 
       - name: Sidecar npm ci
         working-directory: sidecar
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Sidecar bun compile (linux)
         run: bun scripts/build-sidecar.mjs linux
+
+      - name: Stub Windows sidecar for resource path check
+        run: |
+          # tauri.conf.json requires both sidecar paths to exist for cargo check
+          if [ ! -f build/jsra-sidecar.exe ]; then
+            printf 'stub\n' > build/jsra-sidecar.exe
+          fi
 
       - name: cargo check
         working-directory: src-tauri
