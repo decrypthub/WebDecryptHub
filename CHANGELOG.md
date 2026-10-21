@@ -9,6 +9,7 @@
 - NSIS 安装界面换成产品自己的页眉、侧栏和图标。
 - 安全模式的「本会话始终允许」只留在本次运行的内存里，不再写入 `.agent-state.json`，重启后重新询问。
 - 浏览器关闭超过 8 秒才按 PID 结束进程树，并先确认映像仍是本次启动的 Chrome。
+- 安装包再次打入 `jsra-sidecar.exe` 和捆绑资源。`$INSTDIR\{{...}}` 会被 Handlebars 当成转义，归档名不再是真实文件名。
 
 详见 [docs/release-notes/1.3.1.md](docs/release-notes/1.3.1.md)。
 
