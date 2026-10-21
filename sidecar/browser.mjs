@@ -7,6 +7,43 @@ import {EventEmitter} from 'node:events';
 import { NetCapture, MAX_RECORDS } from './netcap.mjs';
 import { summary } from './har.mjs';
 import { Injector } from './inject.mjs';
+import { isLaunchedChrome, killPidTree, readProcessIdentity } from './proctree.mjs';
+
+export const CHROME_CLOSE_TIMEOUT_MS = 8000;
+
+/**
+ * 先等 ctx.close()。到点还没结束才说明 Chrome 卡住，这时再核对 pid 的映像和启动参数。
+ * close 一旦返回（成功或失败），pid 可能已被系统复用，绝不能再 taskkill /T。
+ */
+export async function closeLaunchedBrowser(ctx, {
+  chromePid,
+  chromeExe,
+  profileDir,
+  timeoutMs = CHROME_CLOSE_TIMEOUT_MS,
+  readIdentity = readProcessIdentity,
+  kill = killPidTree,
+  platform = process.platform,
+} = {}) {
+  if (!ctx || typeof ctx.close !== 'function') return { killed: false, reason: 'no-context' };
+  let timer;
+  let finished = false;
+  try {
+    finished = await Promise.race([
+      Promise.resolve().then(() => ctx.close()).then(() => true, () => true),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (finished) return { killed: false, reason: 'closed' };
+  let identity = { image: '', commandLine: '' };
+  try { identity = await Promise.resolve(readIdentity(chromePid, platform)) || identity; } catch {}
+  if (!isLaunchedChrome(identity, { exe: chromeExe, profileDir, platform })) {
+    return { killed: false, reason: 'identity-mismatch', image: identity.image || '' };
+  }
+  try { kill(chromePid, platform); } catch {}
+  return { killed: true, reason: 'hung' };
+}
 
 class BrowserManager extends EventEmitter {
   constructor() {
@@ -56,6 +93,7 @@ class BrowserManager extends EventEmitter {
     // Windows 嵌入模式：窗口先放到屏幕外（不闪现），等 Rust 侧 SetParent 进主窗口后再显示；
     // 被遮挡/隐藏的会话也要持续渲染（回落 screencast 时仍有画面）
     this.embed = !!embed && !headless; this.embedFailed = false; this.chromePid = null;
+    this.chromeExe = executablePath || '';
     if (this.embed) args.push('--window-position=-32000,-32000', `--window-size=${vw},${vh + 88}`, '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding');
     if (this.embed && process.platform === 'linux' && process.env.WAYLAND_DISPLAY) args.push('--ozone-platform=x11');
     // 无头：按面板的 devicePixelRatio 渲染，screencast 帧为设备像素，画面清晰
@@ -247,7 +285,20 @@ class BrowserManager extends EventEmitter {
     await this.stopScreencast();
     const ctx = this.context; this.context = null;
     this.pages = []; this.activePage = null; this.cdpPort = null;
-    if (ctx) await ctx.close().catch(() => {});
+    const chrome = this.chromePid; this.chromePid = null;
+    if (ctx) {
+      const outcome = await closeLaunchedBrowser(ctx, {
+        chromePid: chrome,
+        chromeExe: this.chromeExe,
+        profileDir: this.profileDir,
+        timeoutMs: this.chromeCloseTimeoutMs,
+        readIdentity: this.readBrowserIdentity,
+        kill: this.killBrowserTree,
+      });
+      if (outcome.reason === 'identity-mismatch') {
+        this.emit('log', '关闭浏览器超时，但该 PID 已不是本次启动的 Chrome，已跳过强制结束');
+      }
+    }
     const tmp = this.tmpProfile; this.tmpProfile = null;
     if (tmp) setTimeout(() => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} }, 1500);
     this.emit('status', this.status());

@@ -135,6 +135,9 @@ async function startServer() {
       const merged = override ? { ...settings, ...override, openai: { ...settings.openai, ...(override.openai || {}) }, anthropic: { ...settings.anthropic, ...(override.anthropic || {}) } } : settings;
       return testConnection(merged);
     },
+    // 更新前调用：先应答，再关掉浏览器、工作区后台任务和 MCP，然后退出。
+    // 外壳会等一段时间；到点仍未退出就按进程树强制结束。
+    'prepare-exit': () => { gracefulExit(); return { ok: true }; },
     'export-diagnostics': async () => {
       try {
         const out = path.join(settingsMod.userDataDir(), 'diagnostics-' + Date.now() + '.txt');
@@ -183,7 +186,11 @@ async function startServer() {
       }
     });
   });
-  async function gracefulExit() { try { await sessions.closeAll(); } catch {} fileLog('sidecar 退出'); process.exit(0); }
+  async function gracefulExit() {
+    try { await sessions.closeAll(); } catch {}
+    fileLog('sidecar 退出');
+    process.exit(0);
+  }
   process.on('SIGINT', gracefulExit);
   process.on('SIGTERM', gracefulExit);
   watchParent(() => { fileLog('父进程已退出，sidecar 自行关闭'); gracefulExit(); });

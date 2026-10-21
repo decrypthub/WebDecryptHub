@@ -20,18 +20,28 @@ export async function checkForUpdate() {
   }
 }
 
-/** 下载并安装，progressCb({event, data}) */
+function trackDownload(ev, state) {
+  if (ev.event === 'Started') state.contentLength = ev.data.contentLength || 0;
+  else if (ev.event === 'Progress') state.downloaded += ev.data.chunkLength || 0;
+  else if (ev.event === 'Finished' && state.contentLength) state.downloaded = state.contentLength;
+  return { event: ev.event, downloaded: state.downloaded, contentLength: state.contentLength };
+}
+
+/** 下载并安装。progressCb 在下载过程中收到百分比，进入安装阶段时 event 为 Installing。 */
 export async function downloadAndInstall(update, progressCb) {
-  let downloaded = 0, contentLength = 0;
-  await update.downloadAndInstall((ev) => {
-    if (ev.event === 'Started') contentLength = ev.data.contentLength || 0;
-    else if (ev.event === 'Progress') downloaded += ev.data.chunkLength || 0;
-    progressCb?.({ event: ev.event, downloaded, contentLength, data: ev.data });
-  });
+  const state = { downloaded: 0, contentLength: 0 };
+  await update.download((ev) => progressCb?.(trackDownload(ev, state)));
+  progressCb?.({ event: 'Installing', downloaded: state.downloaded, contentLength: state.contentLength });
+  // 让「正在安装」先画出来，再去做可能要几秒的进程清理。
+  await new Promise((r) => setTimeout(r, 60));
+  if (native.isNative()) await native.prepareForUpdate();
+  await update.install();
 }
 
 export async function installAndRelaunch(update, progressCb) {
   await downloadAndInstall(update, progressCb);
+  // Windows 上 install() 会拉起安装器并退出进程；安装器带 /R，装完自己重新打开。
+  // 其它平台安装不会退出，这里再重启。
   await relaunch();
 }
 
