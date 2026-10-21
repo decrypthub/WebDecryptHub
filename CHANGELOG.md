@@ -2,6 +2,16 @@
 
 各版本详细说明见 `docs/release-notes/`。
 
+## 1.3.0
+
+- 工作区精确编辑 `workspace_edit` 与搜索 `workspace_grep`。
+- 会话工作区 shell，以及后台任务的输出查看和结束；子进程不再继承 `WDH_LLM_API_KEY`。
+- 会话模式：安全（应用内确认）、自主、计划（只读，确认后执行）。默认安全。
+- 对话顶部的逆向任务清单，随会话保存。
+- 请求、脚本选区和断点调用栈可以一键挂到 AI 对话。
+
+详见 [docs/release-notes/1.3.0.md](docs/release-notes/1.3.0.md)。
+
 ## 1.2.2
 
 - 原生嵌入浏览器：Windows / Linux X11 下真实 Chrome 窗口嵌入左侧面板（Wayland 走 XWayland），修复重启后偶发黑屏与 X11 点击聚焦。

@@ -108,6 +108,22 @@ async function startServer() {
     'read-file': a => { const s = S(a); const p = path.resolve(s.projectDir, String(a.file || '')); if (!p.startsWith(s.projectDir)) return '拒绝：仅允许读取会话项目目录'; try { return fs.readFileSync(p, 'utf8').slice(0, 300000); } catch (e) { return '读取失败: ' + e.message; } },
     'list-files': a => { const s = S(a); try { return fs.readdirSync(s.projectDir, { recursive: true }).map(String).filter(f => { try { return fs.statSync(path.join(s.projectDir, f)).isFile(); } catch { return false; } }).map(f => ({ name: f, size: fs.statSync(path.join(s.projectDir, f)).size, mtime: fs.statSync(path.join(s.projectDir, f)).mtimeMs })).sort((x, y) => y.mtime - x.mtime); } catch { return []; } },
     'agent-send': a => S(a).send(a),
+    'agent-state': a => { const s = S(a); s.ensureAgent(); return s.publicState(); },
+    'session-set-mode': a => S(a).setMode(a?.mode),
+    'agent-execute': a => {
+      const s = S(a);
+      if (!s.browser.running) return { ok: false, error: '请先打开浏览器，再执行计划' };
+      if (s.mode === 'plan') s.setMode(s.prevMode === 'autonomous' ? 'autonomous' : 'safe');
+      return s.send({ text: '请按已确认的计划执行。从任务清单里未完成的步骤继续，现在可以写入文件、运行脚本和调用 shell。' });
+    },
+    'agent-approval-reply': a => ({ ok: S(a).replyApproval(a?.id, { allow: !!a?.allow, always: !!a?.always }) }),
+    'debug-paused': async a => {
+      const s = S(a);
+      if (!s.browser.running || !s.mcp?.has?.('get_paused_info')) return { paused: false, text: '浏览器分析内核未连接，无法读取断点。' };
+      const r = await s.mcp.call('get_paused_info', { includeScopes: true, maxScopeDepth: 2, frameIndex: 0 });
+      const paused = !r.isError && /Execution Paused|Call Stack/.test(r.text || '');
+      return { paused, text: r.text, isError: !!r.isError };
+    },
     'agent-interrupt': a => { S(a).agent?.interrupt(); return true; },
     'agent-wrapup': a => { S(a).agent?.finishSoon(); return true; },
     'agent-reset': a => { S(a).ensureAgent().reset(); return true; },

@@ -9,7 +9,15 @@ import { scheduleStartupCheck } from './updater.js';
 
 const api = window.api;
 const mod = e => e.ctrlKey || e.metaKey;
-const blank = () => ({ status: { running: false, pages: [] }, requests: [], scripts: [], events: [], logs: [], usage: null, agentRunning: false, thinking: false, toolCount: 0, url: 'https://' });
+const blank = () => ({ status: { running: false, pages: [] }, requests: [], scripts: [], events: [], logs: [], usage: null, agentRunning: false, thinking: false, toolCount: 0, url: 'https://', mode: 'safe' });
+const FALLBACK_TODOS = [
+  { id: 'locate', content: '定位参数', status: 'pending' },
+  { id: 'signer', content: '找到签名函数', status: 'pending' },
+  { id: 'extract', content: '抠代码 / 补环境', status: 'pending' },
+  { id: 'repro', content: '本地复现', status: 'pending' },
+  { id: 'compare', content: '与浏览器结果对比', status: 'pending' },
+];
+const MODE_LABEL = { safe: '安全', autonomous: '自主', plan: '计划' };
 
 // 每个会话的 UI 状态（事件按 sid 路由，互不干扰）
 function reducer(st, a) {
@@ -45,7 +53,8 @@ export default function App() {
   // 每个会话标签独立的待发送附件（芯片）
   const [atts, setAtts] = useState({});
   const lastAtt = useRef({});
-  const addAtt = useCallback((s, list) => { setAtts(m => { const cur = m[s] || []; const add = (Array.isArray(list) ? list : [list]).filter(a => !cur.some(x => x.key === a.key)); return { ...m, [s]: [...cur, ...add].slice(0, 12) }; }); setRtab('chat'); }, []);
+  const approvalChain = useRef(Promise.resolve());
+  const addAtt = useCallback((s, list) => { setAtts(m => { const cur = m[s] || []; const add = (Array.isArray(list) ? list : [list]).filter(a => !cur.some(x => x.key === a.key)); return { ...m, [s]: [...cur, ...add].slice(0, 12) }; }); setRtab('chat'); setTimeout(() => inputRef.current?.focus(), 40); }, []);
   const rmAtt = useCallback((s, key) => setAtts(m => ({ ...m, [s]: (m[s] || []).filter(x => x.key !== key) })), []);
   const sid = sessions.focused;
   const cur = (sid && S[sid]) || blank();
@@ -107,11 +116,23 @@ export default function App() {
       on('agent-tool-end', (t, s) => dispatch({ t: 'tool-end', sid: s, v: t })),
       on('agent-error', (e, s) => dispatch({ t: 'ev', sid: s, v: { type: 'error', content: e } })),
       on('agent-done', (d, s) => { dispatch({ t: 'patch', sid: s, patch: { agentRunning: false, thinking: false } }); if (d?.stop === 'max-steps') dispatch({ t: 'ev', sid: s, v: { type: 'note', content: '已达步数上限，已输出阶段性总结。可继续对话让它接着分析。' } }); }),
+      on('agent-todos', (v, s) => dispatch({ t: 'patch', sid: s, patch: { todos: v } })),
+      on('agent-mode', (v, s) => dispatch({ t: 'patch', sid: s, patch: { mode: v?.mode || 'safe', prevMode: v?.prevMode } })),
+      on('agent-approval', (v, s) => {
+        dispatch({ t: 'patch', sid: s, patch: { approval: v } });
+        approvalChain.current = approvalChain.current.then(async () => {
+          const choice = await askConfirm(v.summary || `允许执行 ${v.name}？`, { ok: '允许', danger: v.category === 'reset' || v.category === 'shell' || v.category === 'overwrite', always: '本会话始终允许' });
+          const allow = choice === true || choice === 'always';
+          try { await api.invoke('agent-approval-reply', { sessionId: s, id: v.id, allow, always: choice === 'always' }); } catch {}
+          dispatch({ t: 'patch', sid: s, patch: { approval: null } });
+          dispatch({ t: 'ev', sid: s, v: { type: 'note', content: (allow ? '已允许 ' : '已拒绝 ') + (v.name || '操作') + (choice === 'always' ? '（本会话内同类操作不再询问）' : '') } });
+        }).catch(() => {});
+      }),
     ];
     return () => offs.forEach(f => f && f());
   }, []);
   // 会话列表变化时同步运行态
-  useEffect(() => { for (const s of sessions.sessions) dispatch({ t: 'patch', sid: s.id, patch: { agentRunning: s.agentRunning } }); }, [sessions]);
+  useEffect(() => { for (const s of sessions.sessions) dispatch({ t: 'patch', sid: s.id, patch: { agentRunning: s.agentRunning, mode: s.mode || 'safe' } }); }, [sessions]);
   // 会话恢复：首次见到某会话时载入其网址、对话记录与已捕获请求
   const seen = useRef(new Set());
   useEffect(() => { for (const s of sessions.sessions) { if (seen.current.has(s.id)) continue; seen.current.add(s.id);
@@ -119,6 +140,7 @@ export default function App() {
     try { const ev = JSON.parse(localStorage.getItem('wdh_ev_' + s.id) || 'null'); if (Array.isArray(ev) && ev.length) patch.events = ev; } catch {}
     dispatch({ t: 'patch', sid: s.id, patch });
     api.invoke('agent-context', { sessionId: s.id }).then(v => v && dispatch({ t: 'patch', sid: s.id, patch: { ctx: v } })).catch(() => {});
+    api.invoke('agent-state', { sessionId: s.id }).then(v => v && dispatch({ t: 'patch', sid: s.id, patch: { mode: v.mode || 'safe', prevMode: v.prevMode, todos: v.todos } })).catch(() => {});
     api.invoke('get-requests', { sessionId: s.id }).then(r => r?.list?.length && dispatch({ t: 'requests', sid: s.id, v: r.list })).catch(() => {});
   } }, [sessions]);
   // 对话记录持久化（截断工具输出，避免占满存储）
@@ -309,13 +331,15 @@ export default function App() {
             </div>
             <div className="rbody">
               {rtab === 'chat' && <ChatPane cur={cur} atts={atts[sid] || []} rmAtt={k => rmAtt(sid, k)} addAtt={l => addAtt(sid, l)} toast={toast}
+                mode={cur.mode || 'safe'} todos={cur.todos} approval={cur.approval} setMode={m => inv('session-set-mode', { mode: m })}
+                executePlan={async () => { const r = await inv('agent-execute'); if (!r?.ok) toast(r?.error || '无法执行计划', 'warn'); else dispatch({ t: 'patch', sid, patch: { agentRunning: true } }); }}
                 ctxAct={async (act, arg) => {
                   if (act === 'compress') await compactNow(arg || '');
                   else if (act === 'window') await setWindow(arg);
                   else if (act === 'clear') { await inv('agent-reset'); dispatch({ t: 'ev', sid, v: { type: 'note', content: '上下文已清空，AI 不再记得以上内容' } }); }
                   else if (act === 'new') { await inv('agent-new-chat'); dispatch({ t: 'patch', sid, patch: { events: [], usage: null } }); }
                 }} winVal={(settings.provider === 'anthropic' ? settings.anthropic : settings.openai).contextWindow || 0} chatRef={chatRef} input={input} setInput={setInput} inputRef={inputRef} send={send} cleanRetry={cleanRetry} inv={inv} hasKey={hasKey} goSettings={() => setRtab('settings')} />}
-              {rtab === 'evidence' && <NetworkPane key={sid} cur={cur} inv={inv} toast={toast} onAttach={l => addAtt(sid, l)} />}
+              {rtab === 'evidence' && <NetworkPane key={sid} cur={cur} inv={inv} toast={toast} onAttach={l => addAtt(sid, l)} onPrompt={t => setInput(v => v.trim() ? v : t)} />}
               {rtab === 'code' && <CodePane key={sid} sid={sid} inv={inv} toast={toast} events={cur.events} onAttach={l => addAtt(sid, l)} />}
               {rtab === 'settings' && <SettingsPane initial={settings} onSave={saveSettings} toast={toast} />}
             </div>
@@ -406,8 +430,27 @@ function AttachMenu({ cur, inv, addAtt, toast }) {
   </div>;
 }
 
-function ChatPane({ cur, atts, rmAtt, addAtt, toast, ctxAct, winVal, chatRef, input, setInput, inputRef, send, cleanRetry, inv, hasKey, goSettings }) {
+function ModeSwitch({ mode, onChange }) {
+  return <div className="seg-ctl xs mode-sw" title="安全：shell / npm / 覆盖大文件 / 重置需确认。自主：直接执行。计划：只读，直到点执行。">
+    {[['safe', '安全'], ['autonomous', '自主'], ['plan', '计划']].map(([k, l]) => <button key={k} type="button" className={mode === k ? 'on' : ''} onClick={() => onChange(k)}>{l}</button>)}
+  </div>;
+}
+function TodoCard({ todos, mode, onExecute, busy, browserOn }) {
+  const [open, setOpen] = useState(true);
+  const list = todos?.length ? todos : FALLBACK_TODOS;
+  const done = list.filter(t => t.status === 'completed').length;
+  return <div className={'todo-card' + (mode === 'plan' ? ' plan' : '')}>
+    <div className="todo-h" onClick={() => setOpen(o => !o)}>
+      <Icon n="check" size={13} /><span>逆向清单</span><span className="mode-badge">{MODE_LABEL[mode] || '安全'}模式</span><span className="hint">{done}/{list.length}</span><span className="grow" />
+      {mode === 'plan' && <button className="btn-primary btn-sm" disabled={busy || !browserOn} title={browserOn ? '按清单执行，并回到进入计划前的模式' : '请先打开浏览器'} onClick={e => { e.stopPropagation(); onExecute(); }}>执行计划</button>}
+      <Icon n={open ? 'chevup' : 'chevdown'} size={12} />
+    </div>
+    {open && <ul className="todo-list">{list.map(t => <li key={t.id} className={'st-' + t.status}><span className="mark">{t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '●' : t.status === 'cancelled' ? '–' : '○'}</span><span>{t.content}</span></li>)}</ul>}
+  </div>;
+}
+function ChatPane({ cur, atts, rmAtt, addAtt, toast, ctxAct, winVal, chatRef, input, setInput, inputRef, send, cleanRetry, inv, hasKey, goSettings, mode, todos, approval, setMode, executePlan }) {
   return <div className="chat">
+    <TodoCard todos={todos} mode={mode} onExecute={executePlan} busy={cur.agentRunning} browserOn={cur.status.running} />
     <div className="chat-scroll" ref={chatRef}>
       {!hasKey && <div className="callout warn"><Icon n="info" size={14} />尚未配置模型 API Key。<button className="linkbtn" onClick={goSettings}>去设置</button></div>}
       {cur.events.length === 0
@@ -415,12 +458,14 @@ function ChatPane({ cur, atts, rmAtt, addAtt, toast, ctxAct, winVal, chatRef, in
         : cur.events.map((e, i) => <EventView key={i} e={e} />)}
       {cur.agentRunning && <div className="typing"><span /><span /><span />{cur.thinking ? '思考中' : '执行中'}</div>}
     </div>
+    {approval && <div className="approval-wait"><Icon n="info" size={14} />等待确认：{approval.name}</div>}
     <div className="composer">
       {atts.length > 0 && <div className="att-chips">{atts.map(a => <span key={a.key} className="att" title={a.label}><Icon n={ATT_ICON[a.kind] || 'file'} size={11} /><span className="t">{a.label}</span><button onClick={() => rmAtt(a.key)} title="移除"><Icon n="x" size={10} /></button></span>)}</div>}
       <textarea ref={inputRef} value={input} rows={1} onChange={e => { setInput(e.target.value); e.target.style.height = 'auto'; e.target.style.height = Math.min(160, e.target.scrollHeight) + 'px'; }}
         onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(false); } }}
         placeholder={cur.agentRunning ? 'AI 正在分析…' : '描述要分析的参数（Enter 发送 · /compact 压缩上下文）'} disabled={cur.agentRunning} />
       <div className="composer-bar">
+        <ModeSwitch mode={mode} onChange={setMode} />
         {cur.agentRunning ? <>
           <button className="btn btn-sm" onClick={() => inv('agent-wrapup')} title="不再调用工具，立即总结"><Icon n="flag" size={12} />收尾总结</button>
           <button className="btn-danger btn-sm" onClick={() => inv('agent-interrupt')}><Icon n="stop" size={11} />中断</button>

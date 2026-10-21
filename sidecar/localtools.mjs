@@ -12,6 +12,7 @@ import {VMP_TOOLS} from './vmptrace.mjs';
 import {ANTIDEBUG_TOOLS} from './antidebug.mjs';
 import {ENV_TOOLS} from './envtools.mjs';
 import {WORKSPACE_TOOLS} from './workspace.mjs';
+import {TODO_TOOLS} from './todos.mjs';
 
 function readMaybeFile(projectDir, s) {
   if (!s) return '';
@@ -236,5 +237,5 @@ const INJECT_TOOLS = [
   { name: 'inject_status', description: '检查页面内持久注入状态（window.__jsra_inject / antiDebug / fingerprint / vmp）。rearm=true 时重新武装所有已登记脚本。', schema: { type: 'object', properties: { rearm: { type: 'boolean' } } }, run: injectStatus },
   { name: 'inject_rearm', description: '重新武装 Injector（Page.addScriptToEvaluateOnNewDocument + context.addInitScript + Target.setAutoAttach）。可选登记 name+source。', schema: { type: 'object', properties: { name: { type: 'string' }, source: { type: 'string' } } }, run: injectRearm },
 ];
-LOCAL_TOOLS.push(...NET_TOOLS, ...AST_TOOLS, ...WORKSPACE_TOOLS, ...ANTIDEBUG_TOOLS, ...VMP_TOOLS, ...FINGERPRINT_TOOLS, ...RESET_TOOLS, ...VM_TOOLS, ...INJECT_TOOLS, ...ENV_TOOLS);
+LOCAL_TOOLS.push(...NET_TOOLS, ...AST_TOOLS, ...WORKSPACE_TOOLS, ...TODO_TOOLS, ...ANTIDEBUG_TOOLS, ...VMP_TOOLS, ...FINGERPRINT_TOOLS, ...RESET_TOOLS, ...VM_TOOLS, ...INJECT_TOOLS, ...ENV_TOOLS);
 export {LOCAL_TOOLS};

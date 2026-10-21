@@ -1,7 +1,7 @@
 // 请求/证据：DevTools 风格抓包面板（列表 + 详情子页签）
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
-import { Icon, EmptyState } from './components.jsx';
+import { Icon, EmptyState, CtxMenu } from './components.jsx';
 import { native } from './transport.js';
 import { parseQuery, parseBody } from '../../sidecar/sig.mjs';
 
@@ -37,7 +37,7 @@ function toPython(d) {
   return lines.join('\n');
 }
 
-export function NetworkPane({ cur, inv, toast, onAttach }) {
+export function NetworkPane({ cur, inv, toast, onAttach, onPrompt }) {
   const [q, setQ] = useState('');
   const [tg, setTg] = useState('api');
   const [onlySig, setOnlySig] = useState(false);
@@ -47,6 +47,7 @@ export function NetworkPane({ cur, inv, toast, onAttach }) {
   const [mode, setMode] = useState('req');
   const [script, setScript] = useState(null);
   const [menu, setMenu] = useState(false);
+  const [ctx, setCtx] = useState(null);
   const listRef = useRef(); const stick = useRef(true);
   const all = cur.requests;
   const list = useMemo(() => {
@@ -58,6 +59,22 @@ export function NetworkPane({ cur, inv, toast, onAttach }) {
   useEffect(() => { const el = listRef.current; if (el && stick.current && !sel) el.scrollTop = el.scrollHeight; }, [list.length]);
   const selSum = sel ? all.find(r => r.id === sel) : null;
 
+  function attachRequest(r, intent) {
+    if (!r) return;
+    const label = intent === 'analyze-sig' ? `签名 ${r.id}` : intent === 'reproduce' ? `复现 ${r.id}` : `${r.id} ${r.method || ''} ${shortPath(r.url)}`;
+    onAttach?.({ key: 'r:' + r.id + (intent ? ':' + intent : ''), kind: 'request', id: r.id, intent, label });
+    if (intent === 'analyze-sig') onPrompt?.('分析这个请求里的签名参数，定位生成代码。');
+    else if (intent === 'reproduce') onPrompt?.('在本地复现这个请求，并和浏览器结果对比。');
+  }
+  async function sendStack() {
+    toast?.('正在读取断点调用栈…', 'info', 1600);
+    try {
+      const r = await inv('debug-paused');
+      if (!r?.paused) { toast?.(String(r?.text || '当前没有暂停的断点').replace(/\s+/g, ' ').slice(0, 180), 'warn', 5000); return; }
+      onAttach?.({ key: 'stack:' + Date.now(), kind: 'snippet', intent: 'stack', label: '断点调用栈', text: r.text });
+      onPrompt?.('根据断点调用栈和作用域，定位签名函数并说明下一步。');
+    } catch (e) { toast?.('读取调用栈失败：' + (e.message || e), 'err'); }
+  }
   async function doExport(kind) {
     setMenu(false);
     const ids = kind === 'all' ? null : kind === 'filtered' ? list.map(r => r.id) : [...(checked.size ? checked : sel ? [sel] : [])];
@@ -73,6 +90,7 @@ export function NetworkPane({ cur, inv, toast, onAttach }) {
   const toolbar = <div className="nw-tools">
     <div className="seg-ctl sm">{[['req', `请求 ${all.length}`], ['js', `脚本 ${cur.scripts.length}`]].map(([k, l]) => <button key={k} className={mode === k ? 'on' : ''} onClick={() => setMode(k)}>{l}</button>)}</div>
     <div className="nw-search"><Icon n="search" size={12} /><input value={q} onChange={e => setQ(e.target.value)} placeholder={mode === 'req' ? '过滤 URL / 参数名' : '过滤脚本 URL'} spellCheck={false} />{q && <button className="icon-btn xs" onClick={() => setQ('')}><Icon n="x" size={11} /></button>}</div>
+    <button className="btn btn-sm" onClick={sendStack} title="把当前断点的调用栈和作用域发给 AI"><Icon n="layers" size={12} />调用栈</button>
     {mode === 'req' && <>
       <button className={'chip-btn ' + (onlySig ? 'on' : '')} onClick={() => setOnlySig(v => !v)} title="只看携带疑似签名参数的请求"><Icon n="key" size={12} />签名</button>
       <button className={'icon-btn ' + (paused ? 'warn' : '')} onClick={async () => setPaused(await inv('net-pause', { paused: !paused }))} title={paused ? '继续抓包' : '暂停抓包'}><Icon n={paused ? 'play' : 'pause'} size={12} /></button>
@@ -89,7 +107,7 @@ export function NetworkPane({ cur, inv, toast, onAttach }) {
     </>}
   </div>;
 
-  if (mode === 'js') return <div className="nw">{toolbar}<ScriptList cur={cur} q={q} inv={inv} script={script} setScript={setScript} onAttach={onAttach} /></div>;
+  if (mode === 'js') return <div className="nw">{toolbar}<ScriptList cur={cur} q={q} inv={inv} script={script} setScript={setScript} onAttach={onAttach} onPrompt={onPrompt} onStack={sendStack} /></div>;
 
   return <div className="nw">
     {toolbar}
@@ -104,7 +122,7 @@ export function NetworkPane({ cur, inv, toast, onAttach }) {
         <div className="nw-head"><span /><span>方法</span><span>状态</span><span>名称</span><span>类型</span><span className="r">大小</span><span className="r">时间</span></div>
         <div className="nw-list" ref={listRef} onScroll={e => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24; }}>
           {list.length === 0 ? <EmptyState icon="network" title={all.length ? '没有匹配的请求' : '暂无请求'} desc={all.length ? '调整过滤条件' : '在左侧打开网址后自动抓包'} />
-            : list.slice(-1500).map(r => { const u = splitUrl(r.url); return <div key={r.id} className={'nw-row ' + (sel === r.id ? 'sel ' : '') + (r.status === 'failed' ? 'failed' : '')} onClick={() => setSel(r.id === sel ? null : r.id)} title={r.url}>
+            : list.slice(-1500).map(r => { const u = splitUrl(r.url); return <div key={r.id} className={'nw-row ' + (sel === r.id ? 'sel ' : '') + (r.status === 'failed' ? 'failed' : '')} onClick={() => setSel(r.id === sel ? null : r.id)} onContextMenu={e => { e.preventDefault(); setCtx({ x: e.clientX, y: e.clientY, req: r }); }} title={r.url}>
               <span onClick={e => e.stopPropagation()}><input type="checkbox" checked={checked.has(r.id)} onChange={e => { const n = new Set(checked); e.target.checked ? n.add(r.id) : n.delete(r.id); setChecked(n); }} /></span>
               <span className={'m ' + r.method}>{r.method}</span>
               <span className={'stc ' + stClass(r.status)}>{r.status === 'pending' ? '…' : r.status === 'failed' ? '失败' : r.status}</span>
@@ -116,23 +134,40 @@ export function NetworkPane({ cur, inv, toast, onAttach }) {
         </div>
       </Panel>
       {sel && <><PanelResizeHandle className="resize-handle h" />
-        <Panel minSize={25} defaultSize={58} id="nd" order={2}><RequestDetail id={sel} sum={selSum} inv={inv} toast={toast} onClose={() => setSel(null)} /></Panel></>}
+        <Panel minSize={25} defaultSize={58} id="nd" order={2}><RequestDetail id={sel} sum={selSum} inv={inv} toast={toast} onClose={() => setSel(null)} onSend={intent => attachRequest(selSum, intent)} /></Panel></>}
     </PanelGroup>
+    {ctx && <CtxMenu x={ctx.x} y={ctx.y} onClose={() => setCtx(null)} items={[
+      { label: '分析此签名', onClick: () => attachRequest(ctx.req, 'analyze-sig') },
+      { label: '复现此请求', onClick: () => attachRequest(ctx.req, 'reproduce') },
+      { label: '发给 AI', onClick: () => attachRequest(ctx.req) },
+    ]} />}
   </div>;
 }
 
 function shortPath(u) { try { const x = new URL(u); return (x.pathname.split('/').filter(Boolean).pop() || x.host).slice(0, 28); } catch { return ''; } }
-function ScriptList({ cur, q, inv, script, setScript, onAttach }) {
+function ScriptList({ cur, q, inv, script, setScript, onAttach, onPrompt, onStack }) {
   const list = cur.scripts.filter(s => !q || s.url.toLowerCase().includes(q.toLowerCase()));
+  const [menu, setMenu] = useState(null);
+  const selText = useRef('');
+  function sendSelection(text) {
+    if (!script) return;
+    if (text) {
+      onAttach?.({ key: 'snip:' + script.id + ':' + text.length + ':' + text.slice(0, 24), kind: 'snippet', intent: 'selection', label: `选区 ${script.id}`, text: `脚本 ${script.id} ${script.url}\n选区:\n${text}` });
+      onPrompt?.('解释这段选中源码在签名流程中的作用。');
+    } else onAttach?.({ key: 's:' + script.id, kind: 'script', id: script.id, label: script.id + ' ' + splitUrl(script.url).name });
+  }
   return <PanelGroup direction="vertical" autoSaveId="wdh-js">
     <Panel defaultSize={40} minSize={15}><div className="nw-list">{list.length ? list.slice().reverse().map(s => <div key={s.id} className={'nw-row js ' + (script?.id === s.id ? 'sel' : '')} onClick={async () => { setScript({ ...s, content: '加载中…' }); setScript({ ...s, content: await inv('read-file', { file: s.file }) }); }}><span className="tag-badge">{s.id}</span><span className="nm"><b>{splitUrl(s.url).name}</b><i>{splitUrl(s.url).host}</i></span><span className="r">{fmtSize(s.size)}</span></div>) : <EmptyState icon="code" title="暂无脚本" />}</div></Panel>
     <PanelResizeHandle className="resize-handle h" />
-    <Panel minSize={20}>{script ? <div className="js-view"><div className="fv-h"><span>{splitUrl(script.url).name}</span><button className="btn btn-sm" onClick={() => { const t = String(window.getSelection?.() || '').trim(); onAttach?.(t ? { key: 'snip:' + script.id + ':' + t.length, kind: 'snippet', text: t, label: `片段 ${script.id}` } : { key: 's:' + script.id, kind: 'script', id: script.id, label: script.id + ' ' + splitUrl(script.url).name }); }} title="选中文字则发送片段，否则发送整个脚本引用"><Icon n="sparkles" size={12} />发给 AI</button></div><pre className="codearea">{String(script.content).slice(0, 200000)}</pre></div> : <EmptyState icon="code" title="选择脚本查看源码" />}</Panel>
+    <Panel minSize={20}>{script ? <div className="js-view"><div className="fv-h"><span>{splitUrl(script.url).name}</span><button className="btn btn-sm" onClick={() => sendSelection(String(window.getSelection?.() || '').trim() || selText.current)} title="选中文字则发送片段，否则发送整个脚本"><Icon n="sparkles" size={12} />发给 AI</button><button className="btn btn-sm" onClick={onStack} title="把当前断点调用栈发给 AI"><Icon n="layers" size={12} />调用栈</button></div>
+      <pre className="codearea" onMouseUp={() => { selText.current = String(window.getSelection?.() || '').trim(); }} onContextMenu={e => { const t = String(window.getSelection?.() || '').trim() || selText.current; if (!t) return; e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, text: t }); }}>{String(script.content).slice(0, 200000)}</pre>
+      {menu && <CtxMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} items={[{ label: '把选区发给 AI', onClick: () => sendSelection(menu.text) }]} />}
+    </div> : <EmptyState icon="code" title="选择脚本查看源码" />}</Panel>
   </PanelGroup>;
 }
 
 const DTABS = [['ov', '概览'], ['hd', '请求头'], ['pl', '载荷'], ['rs', '响应'], ['tm', '时序']];
-function RequestDetail({ id, sum, inv, toast, onClose }) {
+function RequestDetail({ id, sum, inv, toast, onClose, onSend }) {
   const [d, setD] = useState(null);
   const [tab, setTab] = useState(() => localStorage.getItem('wdh_dtab') || 'ov');
   const [copyMenu, setCopyMenu] = useState(false);
@@ -146,6 +181,8 @@ function RequestDetail({ id, sum, inv, toast, onClose }) {
     <div className="nd-h">
       <span className={'m ' + d.method}>{d.method}</span><span className={'stc ' + stClass(d.status)}>{d.status === 'failed' ? '失败' : d.status}</span>
       <span className="nd-url" title={d.url}>{d.url}</span>
+      <button className="btn btn-sm" onClick={() => onSend?.('analyze-sig')} title="把这条请求和发起者发给 AI，分析签名"><Icon n="key" size={12} />分析签名</button>
+      <button className="btn btn-sm" onClick={() => onSend?.('reproduce')} title="把这条请求发给 AI，做本地复现"><Icon n="sparkles" size={12} />复现</button>
       <div className="menu-wrap">
         <button className="btn btn-sm" onClick={() => setCopyMenu(m => !m)}><Icon n="copy" size={12} />复制<Icon n="chevdown" size={11} /></button>
         {copyMenu && <div className="menu right" onMouseLeave={() => setCopyMenu(false)} onClick={() => setCopyMenu(false)}>

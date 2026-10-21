@@ -80,7 +80,7 @@ export function LogoMark({ size = 26, className = 'mark' }) {
 }
 
 // 应用内确认框：WebKitGTK/WebView2 下 window.confirm 不可靠（Linux 上不阻塞、直接返回 true），统一用 Promise 版本
-export function askConfirm(message, { ok = '确定', danger = false } = {}) {
+export function askConfirm(message, { ok = '确定', danger = false, always = null } = {}) {
   return new Promise(resolve => {
     const el = document.createElement('div'); document.body.appendChild(el);
     const root = createRoot(el);
@@ -89,9 +89,29 @@ export function askConfirm(message, { ok = '确定', danger = false } = {}) {
       useEffect(() => { const h = e => { if (e.key === 'Escape') done(false); if (e.key === 'Enter') done(true); }; window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h); }, []);
       return <div className="overlay confirm-ov" onMouseDown={e => { if (e.target === e.currentTarget) done(false); }}>
         <div className="modal confirm"><div className="confirm-b">{message}</div>
-          <div className="confirm-f"><button className="btn btn-sm" onClick={() => done(false)}>取消</button><button className={(danger ? 'btn-danger' : 'btn-primary') + ' btn-sm'} autoFocus onClick={() => done(true)}>{ok}</button></div></div>
+          <div className="confirm-f">
+            <button className="btn btn-sm" onClick={() => done(false)}>取消</button>
+            {always && <button className="btn btn-sm" onClick={() => done('always')}>{always}</button>}
+            <button className={(danger ? 'btn-danger' : 'btn-primary') + ' btn-sm'} autoFocus onClick={() => done(true)}>{ok}</button>
+          </div></div>
       </div>;
     }
     root.render(<Dlg />);
   });
+}
+
+export function CtxMenu({ x, y, items, onClose }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const place = () => { const el = ref.current; if (!el) return; const w = el.offsetWidth, h = el.offsetHeight; el.style.left = Math.max(8, Math.min(x, window.innerWidth - w - 8)) + 'px'; el.style.top = Math.max(8, Math.min(y, window.innerHeight - h - 8)) + 'px'; };
+    place();
+    const key = e => { if (e.key === 'Escape') onClose(); };
+    const down = e => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
+    window.addEventListener('keydown', key);
+    window.addEventListener('mousedown', down);
+    return () => { window.removeEventListener('keydown', key); window.removeEventListener('mousedown', down); };
+  }, [x, y, onClose]);
+  return <div className="ctxmenu" ref={ref} style={{ left: x, top: y }} onMouseDown={e => e.stopPropagation()} onContextMenu={e => e.preventDefault()}>
+    {items.map(it => <button key={it.label} disabled={it.disabled} onClick={() => { it.onClick(); onClose(); }}>{it.label}</button>)}
+  </div>;
 }
