@@ -711,17 +711,20 @@ Section Install
   DetailPrint "步骤：写入程序文件"
   !insertmacro WDH_Extract "${MAINBINARYSRCPATH}" "$INSTDIR\${MAINBINARYNAME}.exe"
 
-  ; Copy resources
+  ; Copy resources.
+  ; /oname is relative to SetOutPath $INSTDIR, same as upstream.
+  ; A backslash immediately before a handlebars tag escapes it, so the tag is not
+  ; rendered and 7z lists the literal tag instead of jsra-sidecar.exe.
   {{#each resources_dirs}}
     CreateDirectory "$INSTDIR\\{{this}}"
   {{/each}}
   {{#each resources}}
-    !insertmacro WDH_Extract "{{no-escape @key}}" "$INSTDIR\{{this.[1]}}"
+    !insertmacro WDH_Extract "{{no-escape @key}}" "{{this.[1]}}"
   {{/each}}
 
   ; Copy external binaries
   {{#each binaries}}
-    !insertmacro WDH_Extract "{{no-escape @key}}" "$INSTDIR\{{this}}"
+    !insertmacro WDH_Extract "{{no-escape @key}}" "{{this}}"
   {{/each}}
 
   ; Create file associations

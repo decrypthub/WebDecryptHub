@@ -42,10 +42,19 @@ test('tauri template retries the locked payload writes and still packages every 
   const nsi = read('src-tauri/windows/installer.nsi');
   assert.match(nsi, /!insertmacro WDH_Extract "\$\{MAINBINARYSRCPATH\}"/);
   assert.match(nsi, /\{\{#each resources\}\}/);
-  assert.match(nsi, /!insertmacro WDH_Extract "\{\{no-escape @key\}\}" "\$INSTDIR\\\{\{this\.\[1\]\}\}"/);
+  // A single backslash before {{ escapes the handlebars tag, so the payload is archived
+  // under the literal name "{{this.[1]}}" and jsra-sidecar.exe never appears in the installer.
+  assert.match(nsi, /!insertmacro WDH_Extract "\{\{no-escape @key\}\}" "\{\{this\.\[1\]\}\}"/);
+  assert.match(nsi, /!insertmacro WDH_Extract "\{\{no-escape @key\}\}" "\{\{this\}\}"/);
+  assert.equal(/\$INSTDIR\\\{\{/.test(nsi), false, 'backslash before {{ escapes the handlebars tag');
   assert.match(nsi, /!define MUI_FINISHPAGE_RUN_TEXT "立即启动 WebDecryptHub"/);
   assert.match(nsi, /!define MUI_FINISHPAGE_RUN_CHECKED/);
   assert.match(nsi, /!define MUI_PAGE_HEADER_TEXT "正在安装"/);
+  const verify = read('scripts/verify-installer-payload.sh');
+  assert.match(verify, /jsra-sidecar\.exe/);
+  assert.match(verify, /resources\/node\/node\.exe/);
+  assert.match(read('.github/workflows/ci.yml'), /bash scripts\/verify-installer-payload\.sh/);
+  assert.match(read('.github/workflows/release.yml'), /bash scripts\/verify-installer-payload\.sh/);
   assert.match(nsi, /headerImage|HEADERIMAGE/);
 });
 

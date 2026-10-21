@@ -76,11 +76,18 @@ jobs:
         run: |
           npm ci
           npm run build:ui
-      - name: cargo check
-        working-directory: src-tauri
+      - name: Build NSIS installer
         shell: bash
         run: |
-          # tauri.windows.conf.json 的 resources 需存在才能通过 tauri-build 检查，这里放占位文件
-          mkdir -p ../build/resources/patchright-core ../build/resources/node
-          touch ../build/jsra-sidecar.exe ../build/resources/patchright-core/.keep ../build/resources/node/.keep
-          cargo check
+          set -euo pipefail
+          # Real payload names, stub bytes. The verify step checks the archived names.
+          mkdir -p build/resources/patchright-core build/resources/node/node_modules/npm/bin
+          printf 'stub' > build/jsra-sidecar.exe
+          printf 'stub' > build/resources/node/node.exe
+          printf 'stub' > build/resources/node/node_modules/npm/bin/npm-cli.js
+          printf '{}\n' > build/resources/patchright-core/package.json
+          npm i -D @tauri-apps/cli@2
+          npx tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - name: Verify installer payload
+        shell: bash
+        run: bash scripts/verify-installer-payload.sh
