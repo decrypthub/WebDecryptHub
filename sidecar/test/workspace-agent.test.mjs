@@ -6,6 +6,7 @@ import path from 'node:path';
 import { editWorkspace, grepWorkspace, shellWorkspace, jobOutput, jobKill, killAllJobs, childEnv, workspaceFileSize } from '../workspace.mjs';
 import { decideTool } from '../policy.mjs';
 import { Agent } from '../agent.mjs';
+import { SessionManager } from '../sessions.mjs';
 
 function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), 'wdh-ws-')); }
 function write(dir, rel, text) {
@@ -121,6 +122,7 @@ test('plan mode rejects writes; safe mode still asks even if the model sets conf
   const reset = decideTool('safe', 'reset_session', { confirm: true });
   assert.equal(reset.action, 'approve');
   assert.equal(reset.category, 'reset');
+  // 内存里的允许仍然跳过确认；落盘和重启见下面的测试。
   assert.equal(decideTool('safe', 'workspace_shell', { cmd: 'ls' }, { allows: ['shell'] }).action, 'run');
 
   const dir = tmp();
@@ -148,4 +150,36 @@ test('plan mode rejects writes; safe mode still asks even if the model sets conf
   assert.equal(blocked.isError, true);
   assert.equal(asked.category, 'overwrite');
   assert.equal(fs.readFileSync(path.join(dir, 'workspace', 'big.js'), 'utf8'), before);
+});
+
+test('session always-allow stays in memory and is not persisted or restored', async () => {
+  const dir = tmp();
+  const project = path.join(dir, 'projects', 'default');
+  fs.mkdirSync(project, { recursive: true });
+  const stateFile = path.join(project, '.agent-state.json');
+  fs.writeFileSync(stateFile, JSON.stringify({ mode: 'safe', prevMode: 'safe', allows: ['shell'], todos: [] }));
+  const opts = { userDataDir: dir, getSettings: () => ({}), broadcast() {}, chromeMod: {} };
+  const first = new SessionManager(opts);
+  const session = first.get('main');
+  assert.equal(session.allows.has('shell'), false);
+
+  const pending = session.approve({ name: 'workspace_shell', category: 'shell', summary: 'shell' });
+  assert.equal(session.replyApproval('ap1', { allow: true, always: true }), true);
+  assert.equal(await pending, true);
+  assert.equal(session.allows.has('shell'), true);
+  // 点「始终允许」本身不写盘；之后保存模式时也不能把 allows 写回去。
+  assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, 'utf8')).allows, ['shell']);
+  session.setMode('autonomous');
+  const written = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  assert.equal(written.mode, 'autonomous');
+  assert.equal(Object.hasOwn(written, 'allows'), false);
+  assert.equal(session.allows.has('shell'), true);
+
+  const restarted = new SessionManager(opts);
+  const again = restarted.get('main');
+  assert.equal(again.allows.size, 0);
+  assert.equal(again.mode, 'autonomous');
+  const pendingAgain = again.approve({ name: 'workspace_shell', category: 'shell', summary: 'shell' });
+  assert.equal(again.replyApproval('ap1', { allow: false }), true);
+  assert.equal(await pendingAgain, false);
 });

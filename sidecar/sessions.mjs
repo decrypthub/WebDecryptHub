@@ -35,7 +35,8 @@ class Session {
     const st = this.loadState();
     this.mode = MODES.includes(st.mode) ? st.mode : 'safe';
     this.prevMode = st.prevMode === 'autonomous' || st.prevMode === 'safe' ? st.prevMode : 'safe';
-    this.allows = new Set(Array.isArray(st.allows) ? st.allows.filter(x => typeof x === 'string') : []);
+    // 「本会话始终允许」只在这次运行的内存里有效。磁盘上的旧 allows 不恢复。
+    this.allows = new Set();
     this.todos = this.readTodos(st.todos);
   }
   stateFile() { return path.join(this.projectDir, '.agent-state.json'); }
@@ -45,7 +46,7 @@ class Session {
     return DEFAULT_TODOS.map(t => ({ ...t }));
   }
   saveState() {
-    try { fs.writeFileSync(this.stateFile(), JSON.stringify({ mode: this.mode, prevMode: this.prevMode, allows: [...this.allows], todos: this.todos })); } catch {}
+    try { fs.writeFileSync(this.stateFile(), JSON.stringify({ mode: this.mode, prevMode: this.prevMode, todos: this.todos })); } catch {}
   }
   setTodos(list) { this.todos = list; this.saveState(); this.emit('agent-todos', this.todos); }
   setMode(mode) {
@@ -75,7 +76,7 @@ class Session {
   replyApproval(id, { allow, always } = {}) {
     const p = this.pending.get(String(id || ''));
     if (!p) return false;
-    if (allow && always && p.category) { this.allows.add(p.category); this.saveState(); }
+    if (allow && always && p.category) this.allows.add(p.category);
     p.finish(!!allow);
     return true;
   }
