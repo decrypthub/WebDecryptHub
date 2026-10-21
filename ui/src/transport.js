@@ -8,7 +8,7 @@ export const native = {
   isNative,
   async appInfo() {
     if (isNative()) { try { return await tauriInvoke('app_info'); } catch {} }
-    return { name: 'WebDecryptHub', version: '1.2.1 (web)', os: 'web', arch: '-', keyringBackend: '浏览器本地存储(开发)' };
+    return { name: 'WebDecryptHub', version: '1.2.2 (web)', os: 'web', arch: '-', keyringBackend: '浏览器本地存储(开发)' };
   },
   async secretGet() {
     // 系统凭据库不可用（如 Linux 无 Secret Service）时回落到本地存储，避免重启后丢失密钥
@@ -29,6 +29,11 @@ export const native = {
     if (isNative()) return await tauriInvoke('pick_save_path', { defaultName, filterName, ext });
     const p = window.prompt('保存到（绝对路径）', '/tmp/' + defaultName); return p || null;
   },
+  // 原生嵌入 Chrome 子窗口（Windows / Linux X11）
+  async embedSupported() { if (!isNative()) return false; try { return await tauriInvoke('embed_supported'); } catch { return false; } },
+  embedShow(a) { return tauriInvoke('embed_show', a); },
+  async embedHide() { if (isNative()) { try { await tauriInvoke('embed_hide'); } catch {} } },
+  async embedRelease(sessionId) { if (isNative()) { try { await tauriInvoke('embed_release', { sessionId }); } catch {} } },
   async wsPort() { if (isNative()) { try { return await tauriInvoke('get_ws_port'); } catch {} } return null; },
 };
 

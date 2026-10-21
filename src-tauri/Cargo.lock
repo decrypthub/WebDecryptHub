@@ -1756,15 +1756,19 @@ dependencies = [
 
 [[package]]
 name = "jsra-tauri"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "keyring",
+ "raw-window-handle",
+ "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "windows",
+ "x11-dl",
 ]
 
 [[package]]

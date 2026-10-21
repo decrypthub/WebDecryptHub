@@ -23,8 +23,27 @@ class BrowserManager extends EventEmitter {
   }
 
   get running() { return !!this.context; }
+  // 真正处于原生嵌入状态（Windows 有头 + 拿到 PID + 未回落）
+  get embedActive() { return !!(this.context && this.embed && this.chromePid && !this.embedFailed); }
 
-  async launch({ executablePath, headless, profileDir, isolated, projectDir, proxy }) {
+  // 前端/Rust 报告嵌入失败 → 回落到 screencast（窗口仍在屏幕外，渲染不受遮挡影响）
+  // Chrome 自带标签栏/地址栏/边框的尺寸（CSS px），Rust 侧据此把它们裁到宿主窗口外
+  async embedInset() {
+    const p = this.activePage; if (!p) return null;
+    const d = await p.evaluate(() => ({ ow: outerWidth, oh: outerHeight, iw: innerWidth, ih: innerHeight })).catch(() => null);
+    return d ? insetFrom(d) : null;
+  }
+
+  async embedFallback(reason) {
+    if (!this.embed || this.embedFailed) return false;
+    this.embedFailed = true;
+    this.emit('log', '原生嵌入失败，已回落 screencast：' + (reason || '未知原因'));
+    if (this.screencastOn) { this.screencastPage = null; await this.startScreencast(); }
+    this.emit('status', this.status());
+    return true;
+  }
+
+  async launch({ executablePath, headless, profileDir, isolated, projectDir, proxy, embed }) {
     await this.close();
     this.projectDir = projectDir;
     this.net.setDir(projectDir);
@@ -34,7 +53,14 @@ class BrowserManager extends EventEmitter {
     this.headless = !!headless;
     const vw = this.fit?.width || 1366, vh = this.fit?.height || 850;
     if (headless) args.push(`--window-size=${vw},${vh}`);
-    const opts = { executablePath, headless, args, viewport: headless ? { width: vw, height: vh } : null, ignoreHTTPSErrors: true, chromiumSandbox: process.platform !== 'linux' || !!process.env.JSRA_SANDBOX };
+    // Windows 嵌入模式：窗口先放到屏幕外（不闪现），等 Rust 侧 SetParent 进主窗口后再显示；
+    // 被遮挡/隐藏的会话也要持续渲染（回落 screencast 时仍有画面）
+    this.embed = !!embed && !headless; this.embedFailed = false; this.chromePid = null;
+    if (this.embed) args.push('--window-position=-32000,-32000', `--window-size=${vw},${vh + 88}`, '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding');
+    if (this.embed && process.platform === 'linux' && process.env.WAYLAND_DISPLAY) args.push('--ozone-platform=x11');
+    // 无头：按面板的 devicePixelRatio 渲染，screencast 帧为设备像素，画面清晰
+    const dsf = headless && this.dpr > 1 ? this.dpr : undefined;
+    const opts = { executablePath, headless, args, viewport: headless ? { width: vw, height: vh } : null, ...(dsf ? { deviceScaleFactor: dsf } : {}), ignoreHTTPSErrors: true, chromiumSandbox: process.platform !== 'linux' || !!process.env.JSRA_SANDBOX };
     if (proxy) opts.proxy = { server: proxy };
     let dir = profileDir;
     if (isolated) dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jsra-profile-'));
@@ -47,6 +73,8 @@ class BrowserManager extends EventEmitter {
     const portFile = path.join(dir, 'DevToolsActivePort');
     for (let i = 0; i < 100 && !fs.existsSync(portFile); i++) await new Promise(r => setTimeout(r, 100));
     this.cdpPort = Number(fs.readFileSync(portFile, 'utf8').split('\n')[0]);
+    if (this.embed) this.chromePid = await browserPid(this.cdpPort).catch(e => { this.emit('log', '获取 Chrome PID 失败，回落 screencast: ' + e.message); return null; });
+    if (this.embed && !this.chromePid) this.embedFailed = true;
     this.context.on('page', p => { this._addPage(p); if (this.headless && this.fit) p.setViewportSize(this.fit).catch(() => {}); else if (this.fit) setTimeout(() => this._fitHeadedWindow(p), 300); });
     this.context.on('close', () => { this.context = null; this.emit('closed'); });
     for (const p of this.context.pages()) this._addPage(p);
@@ -61,6 +89,7 @@ class BrowserManager extends EventEmitter {
   status() {
     return {
       running: this.running, cdpPort: this.cdpPort,
+      embed: this.embedActive, chromePid: this.embedActive ? this.chromePid : null,
       pages: this.pages.map((p, i) => ({ index: i, url: safe(() => p.url()), active: p === this.activePage })),
     };
   }
@@ -125,10 +154,12 @@ class BrowserManager extends EventEmitter {
   async reload() { await this.activePage?.reload({ waitUntil: 'domcontentloaded' }).catch(() => {}); }
 
   // 无头模式：让页面视口跟随左侧面板尺寸（CSS 像素），画面 1:1 填满不留黑边；有头模式只限制帧尺寸
-  async fitViewport(width, height) {
+  async fitViewport(width, height, dpr) {
     width = Math.max(320, Math.min(3840, Math.round(width))); height = Math.max(240, Math.min(2160, Math.round(height)));
-    if (this.fit && this.fit.width === width && this.fit.height === height) return this.fit;
-    this.fit = { width, height };
+    dpr = clampDpr(dpr);
+    if (this.fit && this.fit.width === width && this.fit.height === height && this.dpr === dpr) return this.fit;
+    this.fit = { width, height }; this.dpr = dpr;
+    if (this.embedActive) return this.fit; // 尺寸由 Rust 侧 SetWindowPos 控制
     if (this.context && this.headless) await Promise.all(this.pages.map(p => p.setViewportSize(this.fit).catch(() => {})));
     if (this.context && !this.headless) await this._fitHeadedWindow();
     if (this.cdp && this.screencastOn) { const p = this.screencastPage; await this.stopScreencast(true); this.screencastPage = null; if (p) await this.startScreencast(); }
@@ -137,7 +168,7 @@ class BrowserManager extends EventEmitter {
 
   // 有头模式：把真实 Chrome 窗口的内容区调整为与左侧面板同宽高，画面不再被裁切/出现横向滚动
   async _fitHeadedWindow(page = this.activePage) {
-    if (!page || !this.fit) return;
+    if (!page || !this.fit || this.embedActive) return;
     try {
       const cdp = await this.context.newCDPSession(page);
       const { windowId } = await cdp.send('Browser.getWindowForTarget');
@@ -152,18 +183,31 @@ class BrowserManager extends EventEmitter {
   // ---- screencast ----
   async startScreencast() {
     this.screencastOn = true;
+    if (this.embedActive) { await this.stopScreencast(true); return; } // 嵌入时无需 screencast/输入转发
     const page = this.activePage; if (!page) return;
     if (this.screencastPage === page && this.cdp) return;
     await this.stopScreencast(true);
     this.screencastPage = page;
     const cdp = await this.context.newCDPSession(page);
     this.cdp = cdp;
+    let last = null, idleT = null;
     cdp.on('Page.screencastFrame', async f => {
-      this.lastFrameMeta = f.metadata;
-      this.emit('frame', { data: f.data, meta: f.metadata });
       cdp.send('Page.screencastFrameAck', { sessionId: f.sessionId }).catch(() => {});
+      this.lastFrameMeta = f.metadata;
+      if (f.data === last) return; // 截图引起的重复帧：不重发、不重置空闲计时（避免 PNG 循环）
+      last = f.data;
+      this.emit('frame', { data: f.data, meta: f.metadata, fmt: 'jpeg' });
+      // 画面静止 400ms 后补发一帧无损 PNG，文字边缘完全清晰
+      clearTimeout(idleT);
+      idleT = setTimeout(async () => {
+        if (this.cdp !== cdp) return;
+        const r = await cdp.send('Page.captureScreenshot', { format: 'png', ...(this.headless ? {} : { fromSurface: true }) }).catch(() => null);
+        if (r?.data && this.cdp === cdp) this.emit('frame', { data: r.data, meta: this.lastFrameMeta, fmt: 'png' });
+      }, 400);
     });
-    await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: this.fit ? this.fit.width : 1920, maxHeight: this.fit ? this.fit.height : 1200, everyNthFrame: 1 }).catch(e => this.emit('log', 'screencast 失败: ' + e.message));
+    cdp.once('Detached', () => clearTimeout(idleT));
+    const sz = screencastSize(this.fit, this.dpr);
+    await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 90, maxWidth: sz.maxWidth, maxHeight: sz.maxHeight, everyNthFrame: 1 }).catch(e => this.emit('log', 'screencast 失败: ' + e.message));
   }
 
   async stopScreencast(keepFlag) {
@@ -173,7 +217,7 @@ class BrowserManager extends EventEmitter {
   }
 
   async input(ev) {
-    const cdp = this.cdp; if (!cdp) return;
+    const cdp = this.cdp; if (!cdp || this.embedActive) return;
     const m = this.lastFrameMeta;
     const scale = m ? (m.deviceWidth / ev.w) : 1;
     const x = ev.x * scale, y = ev.y * scale;
@@ -211,4 +255,32 @@ class BrowserManager extends EventEmitter {
 }
 
 function safe(f) { try { return f(); } catch { return ''; } }
-export {BrowserManager};
+function insetFrom({ ow, oh, iw, ih }) {
+  const side = Math.max(0, Math.min(40, (ow - iw) / 2));
+  return { top: Math.max(0, oh - ih - side), left: side, right: side, bottom: side };
+}
+function clampDpr(d) { d = Number(d); return Number.isFinite(d) && d > 0 ? Math.min(4, Math.max(1, Math.round(d * 100) / 100)) : 1; }
+// screencast 帧上限 = 面板 CSS 尺寸 × devicePixelRatio（设备像素），保证 1:1 显示不被缩放模糊
+function screencastSize(fit, dpr) {
+  const d = clampDpr(dpr);
+  if (!fit) return { maxWidth: Math.round(1920 * d), maxHeight: Math.round(1200 * d) };
+  return { maxWidth: Math.round(fit.width * d), maxHeight: Math.round(fit.height * d) };
+}
+// 通过浏览器级 CDP 取 Chrome 主进程 PID（Rust 侧按 PID EnumWindows 找顶层窗口）
+async function browserPid(port) {
+  const ver = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+  return await new Promise((resolve, reject) => {
+    const ws = new WebSocket(ver.webSocketDebuggerUrl);
+    const t = setTimeout(() => { try { ws.close(); } catch {} reject(new Error('timeout')); }, 5000);
+    ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: 'SystemInfo.getProcessInfo' }));
+    ws.onerror = e => { clearTimeout(t); reject(new Error('ws error')); };
+    ws.onmessage = m => {
+      let j; try { j = JSON.parse(typeof m.data === 'string' ? m.data : String(m.data)); } catch { return; }
+      if (j.id !== 1) return;
+      clearTimeout(t); try { ws.close(); } catch {}
+      const b = (j.result?.processInfo || []).find(p => p.type === 'browser');
+      b ? resolve(b.id) : reject(new Error(j.error?.message || 'no browser process'));
+    };
+  });
+}
+export {BrowserManager, screencastSize, clampDpr, insetFrom};

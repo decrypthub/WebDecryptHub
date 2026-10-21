@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
+mod embed;
 
 const KEYRING_SERVICE: &str = "com.webdecrypthub.app";
 const LEGACY_KEYRING_SERVICE: &str = "com.niying.jsra";
@@ -135,7 +136,29 @@ fn restart_sidecar(state: State<AppState>) -> Result<(), String> {
     }
 }
 
+// ---- 原生嵌入 Chrome（Windows Win32 / Linux X11）----
+// 同步命令在主线程执行，原生窗口操作都在主线程完成
+#[tauri::command]
+fn embed_show(app: tauri::AppHandle, session_id: String, pid: u32, rect: embed::CssRect, dpr: f64, inset: Option<embed::CssInset>) -> Result<serde_json::Value, String> {
+    let win = app.get_webview_window("main").ok_or("no main window")?;
+    embed::show(&win, &session_id, pid, rect, dpr, inset.unwrap_or_default())
+}
+#[tauri::command]
+fn embed_hide() { embed::hide_all(); }
+#[tauri::command]
+fn embed_release(session_id: String) { embed::release(&session_id); }
+#[tauri::command]
+fn embed_supported() -> bool {
+    if cfg!(windows) { return true; }
+    cfg!(target_os = "linux") && std::env::var("DISPLAY").map(|d| !d.is_empty()).unwrap_or(false)
+}
+
 fn main() {
+    // Wayland 会话：主窗口与 Chrome 都走 XWayland，才能用 XReparentWindow 嵌入（JSRA_NO_EMBED=1 可关闭）
+    #[cfg(target_os = "linux")]
+    if std::env::var("WAYLAND_DISPLAY").is_ok() && std::env::var("DISPLAY").is_ok() && std::env::var("GDK_BACKEND").is_err() && std::env::var("JSRA_NO_EMBED").is_err() {
+        std::env::set_var("GDK_BACKEND", "x11");
+    }
     let port: Arc<Mutex<u16>> = Arc::new(Mutex::new(0));
     let sidecar = Arc::new(Mutex::new(None));
     let running = Arc::new(Mutex::new(true));
@@ -145,7 +168,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(AppState { port: port.clone(), sidecar: sidecar.clone(), running: running.clone() })
-        .invoke_handler(tauri::generate_handler![secret_set, secret_get, secret_clear, get_ws_port, app_info, restart_sidecar, pick_save_path])
+        .invoke_handler(tauri::generate_handler![secret_set, secret_get, secret_clear, get_ws_port, app_info, restart_sidecar, pick_save_path, embed_show, embed_hide, embed_release, embed_supported])
         .setup(move |app| {
             match spawn_sidecar(&port) {
                 Ok(c) => { *sidecar.lock().unwrap() = Some(c); }
@@ -190,6 +213,14 @@ fn main() {
                 .additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,LocalNetworkAccessChecks,BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights");
             if std::env::var("JSRA_MAXIMIZE").is_ok() { b = b.maximized(true); }
             let win = b.build()?;
+            // 定时收养 Chrome 新弹出的顶层窗口 / X11 点击焦点跟随
+            {
+                let h = app.handle().clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    if h.run_on_main_thread(embed::tick).is_err() { break; }
+                });
+            }
             if !shot.is_empty() {
                 let w = win.clone();
                 std::thread::spawn(move || {

@@ -72,6 +72,7 @@ export function SettingsPane({ initial, onSave, toast }) {
       <div className="row2">
         <div className="field"><label>主会话登录态</label><div className="seg-ctl sm"><button className={!s.isolated ? 'on' : ''} onClick={() => up('isolated', false)}>保留</button><button className={s.isolated ? 'on' : ''} onClick={() => up('isolated', true)}>每次全新</button></div></div>
         <div className="field"><label>显示模式</label><div className="seg-ctl sm"><button className={!s.headless ? 'on' : ''} onClick={() => up('headless', false)}>有头（推荐）</button><button className={s.headless ? 'on' : ''} onClick={() => up('headless', true)}>无头</button></div></div>
+        {!s.headless && <div className="field"><label>浏览器嵌入</label><div className="seg-ctl sm">{[['auto', '自动'], ['embedded', '原生嵌入'], ['screencast', '画面串流']].map(([k, t]) => <button key={k} className={(s.embedMode || 'auto') === k ? 'on' : ''} onClick={() => up('embedMode', k)}>{t}</button>)}</div><div className="hint">原生嵌入：真实 Chrome 窗口直接嵌在左侧（Windows / Linux X11）；失败时自动回落画面串流。重新打开浏览器后生效</div></div>}
         <div className="field"><label>反调试绕过</label><div className="seg-ctl sm"><button className={!s.antiDebug ? 'on' : ''} onClick={() => up('antiDebug', false)}>关闭</button><button className={s.antiDebug ? 'on' : ''} onClick={() => up('antiDebug', true)}>默认开启</button></div>
           <div className="hint">开启后每次启动浏览器自动注入：中和 debugger 死循环、DevTools 检测、toString / console 时序 / outerWidth 检测。</div></div>
       </div>

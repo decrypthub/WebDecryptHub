@@ -7,6 +7,7 @@ import { BrowserManager } from './browser.mjs';
 import { McpBridge } from './mcp.mjs';
 import { Agent } from './agent.mjs';
 import { LOCAL_TOOLS } from './localtools.mjs';
+import { wantEmbed } from './settings.mjs';
 
 const MAX_SESSIONS = 6;
 
@@ -32,7 +33,7 @@ class Session {
     const live = this.browser.activePage ? safe(() => this.browser.activePage.url()) : '';
     if (/^https?:/.test(live)) this.lastUrl = live;
     const url = live || this.lastUrl;
-    return { id: this.id, title: this.title, primary: this.primary, running: this.browser.running, agentRunning: !!this.agent?.running, url, projectDir: this.projectDir };
+    return { id: this.id, title: this.title, primary: this.primary, running: this.browser.running, embed: this.browser.embedActive, chromePid: this.browser.embedActive ? this.browser.chromePid : null, agentRunning: !!this.agent?.running, url, projectDir: this.projectDir };
   }
   toolCtx() { return { projectDir: this.projectDir, browser: this.browser, mcp: this.mcp, relaunch: o => this.relaunch(o) }; }
   profileDir() { return this.primary ? path.join(this.mgr.userDataDir, 'chrome-profile') : path.join(this.mgr.userDataDir, 'profiles', this.id); }
@@ -46,7 +47,7 @@ class Session {
         if (!found.length) return { ok: false, needChrome: true, error: '未找到 Chrome/Edge，请在首次运行向导中下载浏览器，或在设置中指定路径' };
         const exe = found[0].path;
         await this.mcp.stop();
-        await this.browser.launch({ executablePath: exe, headless: settings.headless, profileDir: this.profileDir(), isolated: isolated ?? (this.primary ? settings.isolated : true), projectDir: this.projectDir, proxy: settings.proxy });
+        await this.browser.launch({ executablePath: exe, headless: settings.headless, profileDir: this.profileDir(), isolated: isolated ?? (this.primary ? settings.isolated : true), projectDir: this.projectDir, proxy: settings.proxy, embed: wantEmbed(settings) });
         await this.mcp.start({ cdpPort: this.browser.cdpPort, allowedRoot: this.projectDir });
         const prev = this.agent;
         if (!prev) { this.agent = new Agent({ mcp: this.mcp, browser: this.browser, projectDir: this.projectDir, getSettings: this.mgr.getSettings, emit: (ev, p) => { this.emit('agent-' + ev, p); if (ev === 'done' || ev === 'user') this.mgr.emitList(); }, relaunch: o => this.relaunch(o) }); this.agent.restore(); }

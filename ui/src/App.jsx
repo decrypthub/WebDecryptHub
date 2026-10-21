@@ -52,7 +52,7 @@ export default function App() {
   const runningNow = !!(typeof cur !== 'undefined' && cur?.status?.running);
   useEffect(() => {
     const el = viewRef.current; if (!el) return;
-    let t; const push = () => { clearTimeout(t); t = setTimeout(() => { const r = el.getBoundingClientRect(); if (r.width > 50 && r.height > 50) api.invoke('browser-viewport', { sessionId: sidRef.current, width: r.width, height: r.height }).catch(() => {}); }, 250); };
+    let t; const push = () => { clearTimeout(t); t = setTimeout(() => { const r = el.getBoundingClientRect(); if (r.width > 50 && r.height > 50) api.invoke('browser-viewport', { sessionId: sidRef.current, width: r.width, height: r.height, dpr: window.devicePixelRatio || 1 }).catch(() => {}); }, 250); };
     const ro = new ResizeObserver(push); ro.observe(el); push();
     return () => { ro.disconnect(); clearTimeout(t); };
   }, [sid, runningNow]);
@@ -118,7 +118,48 @@ export default function App() {
   useEffect(() => { const t = setTimeout(() => { for (const [id, st] of Object.entries(S)) { if (st.agentRunning) continue; try { if (!st.events.length) localStorage.removeItem('wdh_ev_' + id); else localStorage.setItem('wdh_ev_' + id, JSON.stringify(st.events.slice(-300).map(e => e.result ? { ...e, result: String(e.result).slice(0, 3000) } : e))); } catch {} } }, 800); return () => clearTimeout(t); }, [S]);
   useEffect(() => { const el = chatRef.current; if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 160) el.scrollTop = el.scrollHeight; }, [cur.events]);
 
-  const drawFrame = useCallback(f => { const cv = canvasRef.current; if (!cv) return; const img = new Image(); img.onload = () => { if (cv.width !== img.width) cv.width = img.width; if (cv.height !== img.height) cv.height = img.height; cv.getContext('2d').drawImage(img, 0, 0); }; img.src = 'data:image/jpeg;base64,' + f.data; }, []);
+  // 帧为设备像素（面板 CSS 尺寸 × devicePixelRatio），canvas 内部尺寸 = 帧尺寸，CSS 尺寸 = 面板 → 1:1 显示
+  const frameSeq = useRef(0);
+  const drawFrame = useCallback(f => { const cv = canvasRef.current; if (!cv) return; const seq = ++frameSeq.current; const img = new Image(); img.onload = () => { if (seq !== frameSeq.current) return; if (cv.width !== img.width) cv.width = img.width; if (cv.height !== img.height) cv.height = img.height; const g = cv.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(img, 0, 0); }; img.src = 'data:image/' + (f.fmt === 'png' ? 'png' : 'jpeg') + ';base64,' + f.data; }, []);
+
+  // ---- 原生嵌入：把面板矩形报告给 Rust，Chrome 子窗口跟随；覆盖层(弹窗/菜单)压住左侧时临时隐藏 ----
+  const embedOn = !!(cur.status.running && cur.status.embed && cur.status.chromePid);
+  const [embedCovered, setEmbedCovered] = useState(false);
+  const embedTry = useRef({});
+  useEffect(() => {
+    if (!embedOn) { native.embedHide(); return; }
+    const el = viewRef.current; if (!el) return;
+    const mySid = sid, pid = cur.status.chromePid; let dead = false, t = null, inset = null, insetAt = 0, lastKey = '', force = true;
+    const covered = () => { const r = el.getBoundingClientRect();
+      for (const o of document.querySelectorAll('.overlay, .menu, [data-embed-cover]')) { const b = o.getBoundingClientRect(); if (b.width && b.height && b.left < r.right && b.right > r.left && b.top < r.bottom && b.bottom > r.top) return true; }
+      return false; };
+    const sync = async () => {
+      if (dead) return;
+      const cov = covered(); setEmbedCovered(cov);
+      if (cov || document.hidden) { if (lastKey !== 'hidden') native.embedHide(); lastKey = 'hidden'; return; }
+      if (!inset || Date.now() - insetAt > 3000) { inset = await api.invoke('embed-inset', { sessionId: mySid }).catch(() => null) || inset; insetAt = Date.now(); if (dead) return; }
+      const r = el.getBoundingClientRect();
+      const key = [r.left, r.top, r.width, r.height, window.devicePixelRatio, JSON.stringify(inset)].join();
+      if (key === lastKey && !force) return; lastKey = key; force = false;
+      try { await native.embedShow({ sessionId: mySid, pid, rect: { x: r.left, y: r.top, w: r.width, h: r.height }, dpr: window.devicePixelRatio || 1, inset }); embedTry.current[mySid] = 0; }
+      catch (e) {
+        const n = (embedTry.current[mySid] || 0) + 1; embedTry.current[mySid] = n;
+        if (n < 24) { force = true; clearTimeout(t); t = setTimeout(sync, 250); return; } // Chrome 窗口可能尚未创建，约 6 秒内重试
+        native.embedHide(); api.invoke('embed-fallback', { sessionId: mySid, reason: String(e?.message || e) }).catch(() => {});
+        toast('原生嵌入失败，已改用画面串流：' + String(e?.message || e), 'warn', 6000);
+      }
+    };
+    let raf = 0; const kick = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(sync); };
+    const ro = new ResizeObserver(kick); ro.observe(el);
+    const mo = new MutationObserver(kick); mo.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener('resize', kick); document.addEventListener('visibilitychange', kick);
+    const iv = setInterval(() => { force = true; kick(); }, 1500); // 兜底：分隔条拖动/最大化后布局稳定再对齐一次
+    kick();
+    return () => { dead = true; clearTimeout(t); clearInterval(iv); cancelAnimationFrame(raf); ro.disconnect(); mo.disconnect(); window.removeEventListener('resize', kick); document.removeEventListener('visibilitychange', kick); native.embedHide(); };
+  }, [embedOn, sid, cur.status.chromePid]);
+  // 会话浏览器关闭 → 释放宿主窗口
+  const prevRun = useRef({});
+  useEffect(() => { for (const [id, st] of Object.entries(S)) { const r = !!st.status?.running; if (prevRun.current[id] && !r) native.embedRelease(id); prevRun.current[id] = r; } }, [S]);
 
   useEffect(() => {
     const h = e => {
@@ -217,7 +258,9 @@ export default function App() {
               {cur.status.pages.map(p => <button key={p.index} className={'ptab ' + (p.active ? 'on' : '')} onClick={() => inv('select-page', { index: p.index })} title={p.url}>{hostOf(p.url) || '空白页'}</button>)}
             </div>}
             <div className="view" ref={viewRef}>
-              {cur.status.running
+              {embedOn
+                ? <div className="embed-slot">{embedCovered ? '浏览器画面已暂时隐藏（关闭弹窗后恢复）' : ''}</div>
+                : cur.status.running
                 ? <canvas ref={canvasRef} className="screencast" tabIndex={0}
                     onMouseDown={e => { e.currentTarget.focus(); sendInput(e, 'mouse', { type: 'mousePressed', clickCount: e.detail || 1 }); }}
                     onMouseUp={e => sendInput(e, 'mouse', { type: 'mouseReleased', clickCount: e.detail || 1 })}

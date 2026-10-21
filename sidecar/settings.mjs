@@ -8,6 +8,8 @@ const DEFAULTS = {
   anthropic: { baseUrl: 'https://api.anthropic.com', apiKey: '', model: 'claude-sonnet-4-5' },
   temperature: 0.2, maxSteps: 40, maxTokens: 4096,
   antiDebug: false, headless: false, chromePath: '', isolated: false, proxy: '',
+  // 浏览器显示方式：auto = Windows 有头时嵌入真实 Chrome 窗口，其它平台/无头用 screencast；embedded / screencast 强制
+  embedMode: 'auto',
 };
 
 export function userDataDir() {
@@ -34,7 +36,17 @@ export function load() {
   if (s.provider !== 'openai' && s.provider !== 'anthropic') s.provider = 'openai'; // 旧版 mock 设置迁移
   if (s.openai.model === 'mock') s.openai.model = '';
   if (process.env.JSRA_HEADLESS) s.headless = process.env.JSRA_HEADLESS === '1';
+  if (!['auto', 'embedded', 'screencast'].includes(s.embedMode)) s.embedMode = 'auto';
+  if (process.env.JSRA_EMBED_MODE) s.embedMode = process.env.JSRA_EMBED_MODE;
   return s;
+}
+// 是否以原生子窗口嵌入（仅 Windows + 有头）。纯函数，便于单元测试
+export function wantEmbed(s, platform = process.platform, env = process.env) {
+  if (s.headless || s.embedMode === 'screencast') return false;
+  if (platform === 'win32') return true;
+  // Linux 需要 X11（Wayland 会话下 Chrome 以 --ozone-platform=x11 跑在 XWayland 上）
+  if (platform === 'linux') return !!env.DISPLAY && !env.JSRA_NO_EMBED;
+  return false; // macOS 等：清晰 screencast
 }
 export function save(s) {
   const c = JSON.parse(JSON.stringify(s));
