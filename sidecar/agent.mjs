@@ -4,6 +4,8 @@ import fsx from 'node:fs';
 import {LOCAL_TOOLS} from './localtools.mjs';
 import pathx from 'node:path';
 import { contextTokens, limitInfo, compactTrigger, breakdown, microcompact, splitByTokens, buildSummaryRequest, SUMMARY_PREFIX, trimToolOutput, readRef, resolveAttachments, estimateTokens } from './context.mjs';
+import { decideTool, planAllows } from './policy.mjs';
+import { formatTodos } from './todos.mjs';
 
 const REF_TOOL = { name: 'context_ref_read', description: '读取被截断的长工具输出（截断提示里的 ctx_ref）。offset/length 分页（默认 6000 字符）。', schema: { type: 'object', properties: { ref: { type: 'string' }, offset: { type: 'number' }, length: { type: 'number' } }, required: ['ref'] } };
 const MAX_AUTO_PER_TURN = 2; // 防抖：单轮最多自动压缩 2 次（参考 Claude Code thrashing 保护）
@@ -16,7 +18,7 @@ const SYSTEM = `你是一个专业的 JavaScript 逆向工程 AI 助手，在一
 3. 大段代码用 save_script_source/outputFile 落盘，不要把超长内容塞进对话。
 4. 断点命中后记得 pause_or_resume 恢复，避免页面卡死。
 5. 阶段性发现用 notes_write 记录。
-6. 干净环境（重要）：旧登录态、Cookie 中缓存的密钥、localStorage 标记、HTTP 缓存都会污染分析。以下情况先 reset_session(confirm=true) 再重新触发请求：开始抓取某个签名请求前需要“首次加载”的完整链路（例如密钥/票据下发接口）；本地复现与浏览器结果不一致、怀疑密钥来自旧状态时；做“有/无登录态”或“清理前/后”A/B 对比时（先用 get_cookies 记录对比基线）。怀疑设备指纹/风控标记残留或需要完全首次访问时用 restart_browser_fresh(confirm=true)。只想清空抓包而保留状态时用 clear_network_requests。重置后旧 reqid/scriptId 全部失效，需重新列出。
+6. 干净环境（重要）：旧登录态、Cookie 中缓存的密钥、localStorage 标记、HTTP 缓存都会污染分析。以下情况调用 reset_session 再重新触发请求：开始抓取某个签名请求前需要“首次加载”的完整链路（例如密钥/票据下发接口）；本地复现与浏览器结果不一致、怀疑密钥来自旧状态时；做“有/无登录态”或“清理前/后”A/B 对比时（先用 get_cookies 记录对比基线）。怀疑设备指纹/风控标记残留或需要完全首次访问时用 restart_browser_fresh。安全模式下应用会向用户弹出确认，不要自己传 confirm=true 假装已经确认。只想清空抓包而保留状态时用 clear_network_requests。重置后旧 reqid/scriptId 全部失效，需重新列出。
 7. 浏览器内存有限：不要在页面里对数 MB 的脚本做整段 fetch/正则/字符串处理；用 search_in_sources 定位后 get_script_source 按 offset/length 小段读取，或 save_script_source（filePath 用相对文件名）落盘后用 grep_file / read_file_slice 在本地检索精读；页面卡死或 evaluate_script 超时时优先走本地文件。
 8. JSVMP/强混淆签名（如知乎 x-zse-96、抖音 a_bogus、小红书 x-s、京东 h5st）不要手工还原字节码，走“先调用原函数，再抽离”：
    a) hook_signer(names=[参数名]) → get_hook_records 拿到写入值与调用栈，定位签名入口（模块/全局函数）；webpack 站点用 webpack_expose(search=参数名) 找模块 id。
@@ -27,7 +29,8 @@ const SYSTEM = `你是一个专业的 JavaScript 逆向工程 AI 助手，在一
    e) export_code 必须带 selfTest，断言值取自真实抓包。没有逐字节对上的结果一律不得声称“已复现”。
 9. 抓包数据：应用从浏览器启动起完整记录所有请求（含请求/响应头、请求体、响应体、时序、发起者），比内核的 list_network_requests 更全。查请求优先用 net_list（可按 param="w_rid"、hasSig、url、types 过滤）→ net_get(id) 看完整请求与响应体 → net_search 在响应体里找密钥/token 来源（如 img_key、salt 由哪个接口下发）→ 大响应体用 net_save_body 落盘后 grep_file。需要交付或离线分析时 net_export_har；用户给了 HAR 文件就 net_load_har。回答“某接口返回了什么”必须引用 net_get 的真实内容，不得编造。
 
-11. 工作区：每个会话有独立 workspace/ 目录。写复现脚本用 workspace_write → workspace_run（捆绑 Node）验证；需要第三方库时 workspace_npm（自动镜像回退）。list 用 workspace_list。
+11. 工作区：每个会话有独立 workspace/ 目录。检索用 workspace_grep（可带 glob），读取用 workspace_read / workspace_list。改已有文件优先 workspace_edit（old_string 必须与文件中唯一一段完全一致，多处匹配会失败；要全部替换就设 replace_all）。新建文件才用 workspace_write。Node 脚本用 workspace_run。任意 shell（npx、git、python、常驻进程）用 workspace_shell；需要常驻时 background=true，再用 workspace_job_output / workspace_job_kill。第三方库用 workspace_npm。
+16. 任务清单：用 todo_write 维护逆向步骤（定位参数 → 找到签名函数 → 抠代码/补环境 → 本地复现 → 与浏览器结果对比）。同一时间尽量只有一步 in_progress。计划模式下先调查再把计划写进清单，不要尝试写入或运行。
 12. 强混淆：优先 ast_deobfuscate（字符串数组/控制流/常量折叠/死代码/重命名）；比 deobfuscate_code 更可控。
 13. JSVMP：vmp_trace_install → 触发签名 → vmp_trace_dump 分析 opcode/调用轨迹，辅助定位；仍以 hook_signer + page_call 对拍为主。
 14. 反调试：页面一进去就转圈/断点死循环时先 anti_debug_enable；设置里可默认开启。
@@ -45,9 +48,16 @@ const AUTO_PROMPT = `请对当前页面执行一键自动分析：按阶段推�
 每阶段结束用一句话小结。如需用户在浏览器手动操作，请明确提示并暂停等待。`;
 
 class Agent {
-  constructor({ mcp, browser, projectDir, getSettings, emit, relaunch }) {
+  constructor({ mcp, browser, projectDir, getSettings, emit, relaunch, getMode, getAllows, approve, getTodos, setTodos, currentUrl, fileSize }) {
     this.mcp = mcp; this.browser = browser; this.projectDir = projectDir; this.relaunch = relaunch;
     this.getSettings = getSettings; this.emit = emit;
+    this.getMode = getMode || (() => 'safe');
+    this.getAllows = getAllows || (() => []);
+    this.approve = approve || null;
+    this.getTodos = getTodos || (() => []);
+    this.setTodos = setTodos || (() => {});
+    this.currentUrl = currentUrl || (() => '');
+    this.fileSize = fileSize || (() => 0);
     this.messages = [{ role: 'system', content: SYSTEM }];
     this.running = false; this.abort = null; this.wrapUp = false;
     this.calib = 1; this.compressions = 0; this.compressing = false;
@@ -94,7 +104,9 @@ class Agent {
       const summary = String(res.content || '').trim();
       if (!summary) throw new Error('模型未返回摘要');
       const meta = { at: Date.now(), reason, instructions: instructions || '', before: before.used, summarized: old.length, ms: Date.now() - t0 };
-      const head = [{ role: 'user', _summary: meta, content: SUMMARY_PREFIX + summary }];
+      const todos = this.getTodos?.() || [];
+      const summaryBody = SUMMARY_PREFIX + summary + (todos.length ? '\n\n【任务清单（压缩后保留）】\n' + formatTodos(todos) : '');
+      const head = [{ role: 'user', _summary: meta, content: summaryBody }];
       if (recent[0]?.role === 'user') head.push({ role: 'assistant', _ack: true, content: '已了解之前的上下文，继续。' });
       this.messages = [this.messages[0], ...head, ...recent];
       this.compressions++;
@@ -119,15 +131,30 @@ class Agent {
   allTools() {
     const mcpTools = (this.mcp.tools || []).map(t => ({ name: t.name, description: t.description, schema: t.inputSchema }));
     const local = LOCAL_TOOLS.map(t => ({ name: t.name, description: t.description, schema: t.schema }));
-    return [...mcpTools, ...local, REF_TOOL];
+    const all = [...mcpTools, ...local, REF_TOOL];
+    if (this.getMode() === 'plan') return all.filter(t => planAllows(t.name, {}));
+    return all;
   }
 
   async runTool(name, args) {
+    const a = args || {};
+    const decision = decideTool(this.getMode(), name, a, {
+      allows: this.getAllows(),
+      existsBytes: name === 'workspace_write' ? (this.fileSize(a.path || a.file) || 0) : 0,
+      currentUrl: this.currentUrl() || '',
+    });
+    if (decision.action === 'deny') return { text: decision.reason, isError: true };
+    if (decision.action === 'approve') {
+      if (!this.approve) return { text: `[已取消] 没有确认界面，已拒绝 ${name}。`, isError: true };
+      const ok = await this.approve({ name, category: decision.category, summary: decision.summary }, this.abort?.signal);
+      if (!ok) return { text: `[已取消] 用户未批准 ${name}。请说明为什么需要这次操作，或改用只读步骤。`, isError: true };
+    }
+    const callArgs = decision.injectConfirm ? { ...a, confirm: true } : a;
     const local = LOCAL_TOOLS.find(t => t.name === name);
-    const ctx = { projectDir: this.projectDir, browser: this.browser, mcp: this.mcp, relaunch: this.relaunch };
-    if (local) return await local.run(args || {}, ctx);
-    if (name === REF_TOOL.name) return readRef(this.ctxDir(), args?.ref, args?.offset, args?.length);
-    if (this.mcp.has(name)) return await this.mcp.call(name, args, this.abort?.signal);
+    const ctx = { projectDir: this.projectDir, browser: this.browser, mcp: this.mcp, relaunch: this.relaunch, getTodos: this.getTodos, setTodos: this.setTodos, signal: this.abort?.signal };
+    if (local) return await local.run(callArgs, ctx);
+    if (name === REF_TOOL.name) return readRef(this.ctxDir(), callArgs?.ref, callArgs?.offset, callArgs?.length);
+    if (this.mcp.has(name)) return await this.mcp.call(name, callArgs, this.abort?.signal);
     return { text: `未知工具：${name}`, isError: true };
   }
 
@@ -146,9 +173,16 @@ class Agent {
       const b = this.browser; const page = b.activePage ? b.activePage.url() : (b.pages[0]?.url?.() || '');
       const api = (b.requests || []).filter(r => r.type === 'xhr' || r.type === 'fetch');
       const sample = [...new Set(api.map(r => r.method + ' ' + r.url.split('?')[0]))].slice(-15);
+      const mode = this.getMode();
+      const modeLine = mode === 'plan' ? '\n【计划模式】只能使用只读工具。调查后用 todo_write 写下步骤，等用户点击「执行」。不要写入、运行或重置。'
+        : mode === 'autonomous' ? '\n【自主模式】操作不会再向用户确认。仍然避免不必要的破坏。'
+        : '\n【安全模式】shell、npm install、覆盖较大的已有文件、重置会话、跳到新域名会由用户在界面确认。不要自己传 confirm=true。';
+      const todos = this.getTodos?.() || [];
       return `【当前状态（应用自动附加）】当前页面：${page || '无'}；应用已捕获请求 ${b.requests?.length || 0} 条（XHR/Fetch ${api.length} 条，find_signature_params / diff_requests 直接使用这些数据）。` +
         `注意：list_network_requests 等浏览器工具只记录内核连接之后的请求，若为空请 navigate_page(reload) 重新触发。` +
-        (sample.length ? `\n近期 XHR/Fetch 接口：\n- ${sample.join('\n- ')}` : '');
+        (sample.length ? `\n近期 XHR/Fetch 接口：\n- ${sample.join('\n- ')}` : '') +
+        modeLine +
+        (todos.length ? '\n' + formatTodos(todos) : '');
     } catch { return ''; }
   }
 

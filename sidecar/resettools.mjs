@@ -80,9 +80,9 @@ async function restartFresh(a, ctx) {
 }
 
 export const RESET_TOOLS = [
-  { name: 'reset_session', description: '「从头再来」：一次性清理当前站点（scope=site，默认）或所有站点（scope=all）的 Cookie（含 HttpOnly）、localStorage/IndexedDB/CacheStorage/ServiceWorker、各 frame 的 sessionStorage，可选清全局 HTTP 缓存，并清空应用与内核的已捕获请求，默认随后刷新页面重新抓包。用于：重新触发签名请求前、复现失败怀疑被旧状态/缓存密钥干扰时、A/B 对比"有/无登录态"时。需 confirm=true。',
+  { name: 'reset_session', description: '「从头再来」：一次性清理当前站点（scope=site，默认）或所有站点（scope=all）的 Cookie（含 HttpOnly）、localStorage/IndexedDB/CacheStorage/ServiceWorker、各 frame 的 sessionStorage，可选清全局 HTTP 缓存，并清空应用与内核的已捕获请求，默认随后刷新页面重新抓包。用于：重新触发签名请求前、复现失败怀疑被旧状态/缓存密钥干扰时、A/B 对比"有/无登录态"时。安全模式下由应用向用户弹出确认，不要自行填写 confirm 代替用户。',
     schema: { type: 'object', properties: { confirm: { type: 'boolean' }, scope: { type: 'string', enum: ['site', 'all'] }, cookies: { type: 'boolean' }, storage: { type: 'boolean' }, cache: { type: 'boolean' }, requests: { type: 'boolean' }, reload: { type: 'boolean' } }, required: ['confirm'] }, run: resetSession },
-  { name: 'restart_browser_fresh', description: '关闭浏览器并用全新的临时隔离 Profile 重启（完全干净：无 Cookie/存储/缓存/扩展状态），可指定 url 重新打开。比 reset_session 更彻底，用于怀疑设备指纹/风控标记残留，或需要"首次访问"行为时。需 confirm=true。',
+  { name: 'restart_browser_fresh', description: '关闭浏览器并用全新的临时隔离 Profile 重启（完全干净：无 Cookie/存储/缓存/扩展状态），可指定 url 重新打开。比 reset_session 更彻底，用于怀疑设备指纹/风控标记残留，或需要"首次访问"行为时。安全模式下由应用向用户弹出确认，不要自行填写 confirm 代替用户。',
     schema: { type: 'object', properties: { confirm: { type: 'boolean' }, url: { type: 'string' } }, required: ['confirm'] }, run: restartFresh },
   { name: 'get_cookies', description: '只读：列出当前页面（或指定 url）的 Cookie，含 HttpOnly/Secure/过期。可用 name 过滤。用于确认签名密钥是否来自 Cookie、对比清理前后差异。',
     schema: { type: 'object', properties: { url: { type: 'string' }, name: { type: 'string' } } }, run: getCookies },

@@ -2,7 +2,7 @@ Unicode true
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 !define APP "WebDecryptHub"
-!define VER "1.2.2"
+!define VER "1.3.0"
 !define UNKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP}"
 
 Name "${APP}"

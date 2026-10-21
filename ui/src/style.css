@@ -282,7 +282,26 @@ label { display: block; font-size: var(--fs-sm); color: var(--text-2); margin-bo
 .composer { margin: 0 12px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-2); padding: 8px 8px 6px 10px; transition: border-color var(--t); }
 .composer:focus-within { border-color: var(--accent); }
 .composer textarea { border: none; background: transparent; box-shadow: none !important; padding: 4px 2px; resize: none; min-height: 24px; max-height: 160px; height: auto; font-size: 13px; line-height: 1.5; }
-.composer-bar { display: flex; align-items: center; gap: 4px; margin-top: 4px; }
+.composer-bar { display: flex; align-items: center; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+.mode-sw { flex: 0 0 auto; }
+.mode-sw button { padding: 3px 8px; }
+.todo-card { margin: 10px 12px 0; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-2); flex-shrink: 0; }
+.todo-card.plan { border-color: var(--accent); }
+.todo-h { display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer; font-size: 12px; font-weight: 600; }
+.todo-h .grow { flex: 1; }
+.todo-h .hint { font-weight: 500; }
+.mode-badge { font-size: 11px; font-weight: 500; color: var(--text-2); background: var(--bg-3); border: 1px solid var(--border); border-radius: 99px; padding: 2px 7px; }
+.todo-card.plan .mode-badge { color: var(--accent); border-color: var(--accent); background: var(--accent-weak); }
+.todo-list { list-style: none; margin: 0; padding: 0 10px 8px; }
+.todo-list li { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; padding: 3px 0; color: var(--text-2); }
+.todo-list li.st-completed { color: var(--text-3); text-decoration: line-through; }
+.todo-list li.st-in_progress { color: var(--text); }
+.todo-list li.st-cancelled { color: var(--text-3); }
+.todo-list .mark { width: 14px; color: var(--accent); flex-shrink: 0; }
+.approval-wait { margin: 0 12px 8px; padding: 8px 10px; border-radius: var(--r-sm); background: var(--warn-bg); color: var(--warn); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.ctxmenu { position: fixed; z-index: 80; min-width: 168px; background: var(--bg-1); border: 1px solid var(--border-2); border-radius: var(--r-md); box-shadow: var(--shadow-2); padding: 4px; display: flex; flex-direction: column; }
+.ctxmenu button { background: transparent; color: var(--text); justify-content: flex-start; border-radius: var(--r-sm); padding: 7px 10px; }
+.ctxmenu button:hover { background: var(--bg-hover); }
 .composer-bar .grow { flex: 1; }
 .composer .send { width: 30px; height: 30px; padding: 0; border-radius: 8px; }
 
@@ -412,7 +431,7 @@ pre.mini { background: var(--bg-2); border: 1px solid var(--border); border-radi
 .nw-row .ty { font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 详情 */
 .nd { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg-1); border-top: 1px solid var(--border); }
-.nd-h { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.nd-h { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .nd-url { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nd-tabs { display: flex; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--border); }
 .nd-tabs button { position: relative; background: transparent; border: none; color: var(--text-2); padding: 8px 12px; font-size: var(--fs-sm); border-bottom: 2px solid transparent; border-radius: 0; }
@@ -530,6 +549,6 @@ pre.raw { margin: 0; padding: 8px 10px; font-family: var(--font-mono); font-size
 
 .msg .bubble { overflow-wrap: anywhere; }
 /* 应用内确认框 */
-.modal.confirm { width: 380px; }
-.confirm-b { padding: 18px 20px 8px; font-size: var(--fs-sm); line-height: 1.6; color: var(--text); }
+.modal.confirm { width: 440px; }
+.confirm-b { padding: 18px 20px 8px; font-size: var(--fs-sm); line-height: 1.6; color: var(--text); white-space: pre-wrap; }
 .confirm-f { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 16px 14px; }

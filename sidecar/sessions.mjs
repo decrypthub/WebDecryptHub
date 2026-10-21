@@ -8,6 +8,9 @@ import { McpBridge } from './mcp.mjs';
 import { Agent } from './agent.mjs';
 import { LOCAL_TOOLS } from './localtools.mjs';
 import { wantEmbed } from './settings.mjs';
+import { DEFAULT_TODOS, normalizeSteps } from './todos.mjs';
+import { MODES } from './policy.mjs';
+import { workspaceFileSize, killAllJobs } from './workspace.mjs';
 
 const MAX_SESSIONS = 6;
 
@@ -28,14 +31,61 @@ class Session {
     this.browser.on('log', m => emit('log', m));
     this.browser.on('closed', () => { emit('browser-status', { running: false, pages: [] }); this.mcp.stop(); mgr.emitList(); });
     this.emit = emit;
+    this.pending = new Map(); this.apSeq = 0;
+    const st = this.loadState();
+    this.mode = MODES.includes(st.mode) ? st.mode : 'safe';
+    this.prevMode = st.prevMode === 'autonomous' || st.prevMode === 'safe' ? st.prevMode : 'safe';
+    this.allows = new Set(Array.isArray(st.allows) ? st.allows.filter(x => typeof x === 'string') : []);
+    this.todos = this.readTodos(st.todos);
+  }
+  stateFile() { return path.join(this.projectDir, '.agent-state.json'); }
+  loadState() { try { return JSON.parse(fs.readFileSync(this.stateFile(), 'utf8')); } catch { return {}; } }
+  readTodos(raw) {
+    try { if (Array.isArray(raw) && raw.length) return normalizeSteps(raw); } catch {}
+    return DEFAULT_TODOS.map(t => ({ ...t }));
+  }
+  saveState() {
+    try { fs.writeFileSync(this.stateFile(), JSON.stringify({ mode: this.mode, prevMode: this.prevMode, allows: [...this.allows], todos: this.todos })); } catch {}
+  }
+  setTodos(list) { this.todos = list; this.saveState(); this.emit('agent-todos', this.todos); }
+  setMode(mode) {
+    const next = MODES.includes(mode) ? mode : 'safe';
+    if (next === 'plan') { if (this.mode !== 'plan') this.prevMode = this.mode; }
+    else this.prevMode = next;
+    this.mode = next;
+    this.saveState();
+    this.emit('agent-mode', { mode: this.mode, prevMode: this.prevMode });
+    this.mgr.emitList();
+    return this.publicState();
+  }
+  publicState() { return { mode: this.mode, prevMode: this.prevMode, todos: this.todos }; }
+  async approve(req, signal) {
+    if (this.allows.has(req.category)) return true;
+    const id = 'ap' + (++this.apSeq);
+    return await new Promise(resolve => {
+      let settled = false;
+      const finish = (allow) => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener?.('abort', onAbort); this.pending.delete(id); resolve(!!allow); };
+      const timer = setTimeout(() => finish(false), 5 * 60 * 1000);
+      const onAbort = () => finish(false);
+      signal?.addEventListener?.('abort', onAbort, { once: true });
+      this.pending.set(id, { finish, category: req.category });
+      this.emit('agent-approval', { id, name: req.name, category: req.category, summary: req.summary });
+    });
+  }
+  replyApproval(id, { allow, always } = {}) {
+    const p = this.pending.get(String(id || ''));
+    if (!p) return false;
+    if (allow && always && p.category) { this.allows.add(p.category); this.saveState(); }
+    p.finish(!!allow);
+    return true;
   }
   info() {
     const live = this.browser.activePage ? safe(() => this.browser.activePage.url()) : '';
     if (/^https?:/.test(live)) this.lastUrl = live;
     const url = live || this.lastUrl;
-    return { id: this.id, title: this.title, primary: this.primary, running: this.browser.running, embed: this.browser.embedActive, chromePid: this.browser.embedActive ? this.browser.chromePid : null, agentRunning: !!this.agent?.running, url, projectDir: this.projectDir };
+    return { id: this.id, title: this.title, primary: this.primary, running: this.browser.running, embed: this.browser.embedActive, chromePid: this.browser.embedActive ? this.browser.chromePid : null, agentRunning: !!this.agent?.running, url, projectDir: this.projectDir, mode: this.mode };
   }
-  toolCtx() { return { projectDir: this.projectDir, browser: this.browser, mcp: this.mcp, relaunch: o => this.relaunch(o) }; }
+  toolCtx() { return { projectDir: this.projectDir, browser: this.browser, mcp: this.mcp, relaunch: o => this.relaunch(o), getTodos: () => this.todos, setTodos: list => this.setTodos(list) }; }
   profileDir() { return this.primary ? path.join(this.mgr.userDataDir, 'chrome-profile') : path.join(this.mgr.userDataDir, 'profiles', this.id); }
 
   async launch({ isolated, url } = {}) {
@@ -64,7 +114,7 @@ class Session {
   }
   // 对话历史与浏览器解耦：未打开浏览器也能查看用量、压缩、清空（每个会话标签独立，落盘到项目目录）
   ensureAgent() {
-    if (!this.agent) { this.agent = new Agent({ mcp: this.mcp, browser: this.browser, projectDir: this.projectDir, getSettings: this.mgr.getSettings, emit: (ev, p) => { this.emit('agent-' + ev, p); if (ev === 'done' || ev === 'user') this.mgr.emitList(); }, relaunch: o => this.relaunch(o) }); this.agent.restore(); }
+    if (!this.agent) { this.agent = new Agent({ mcp: this.mcp, browser: this.browser, projectDir: this.projectDir, getSettings: this.mgr.getSettings, emit: (ev, p) => { this.emit('agent-' + ev, p); if (ev === 'done' || ev === 'user') this.mgr.emitList(); }, relaunch: o => this.relaunch(o), getMode: () => this.mode, getAllows: () => this.allows, approve: (req, signal) => this.approve(req, signal), getTodos: () => this.todos, setTodos: list => this.setTodos(list), currentUrl: () => { try { const u = this.browser.activePage ? this.browser.activePage.url() : ''; return u || this.lastUrl || ''; } catch { return this.lastUrl || ''; } }, fileSize: rel => workspaceFileSize(this.projectDir, rel) }); this.agent.restore(); }
     return this.agent;
   }
   async relaunch({ isolated = true, url } = {}) {
@@ -84,7 +134,7 @@ class Session {
     return { ok: true };
   }
   async closeBrowser() { this.agent?.interrupt(); await this.mcp.stop(); await this.browser.close(); this.mgr.emitList(); }
-  async dispose() { await this.closeBrowser().catch(() => {}); }
+  async dispose() { try { killAllJobs(this.projectDir); } catch {} await this.closeBrowser().catch(() => {}); }
 }
 
 export class SessionManager {

@@ -196,17 +196,17 @@ export async function resolveAttachments(list, { browser, projectDir }) {
         if (!r) { out.push(`【附件·请求 ${a.id}】已不在捕获列表中`); continue; }
         const hdr = o => Object.entries(o || {}).slice(0, 40).map(([k, v]) => `${k}: ${String(v).slice(0, 300)}`).join('\n');
         let body = ''; try { if (r.bodyFile && !r.bodyBinary) body = fs.readFileSync(r.bodyFile, 'utf8').slice(0, 1500); } catch {}
-        out.push(`【附件·请求 ${r.id}】${r.method} ${r.url}\n状态: ${r.status ?? '-'} 类型: ${r.type || '-'}\n请求头:\n${hdr(r.headers)}` +
-          (r.postData ? `\n请求体: ${String(r.postData).slice(0, 2000)}` : '') +
-          (r.respHeaders ? `\n响应头:\n${hdr(r.respHeaders)}` : '') +
-          (body ? `\n响应体(前 1500 字符，完整用 net_get("${r.id}")): ${body.slice(0, 1500)}` : `\n响应体用 net_get("${r.id}") 获取`));
+        const intent = a.intent === 'analyze-sig' ? '请分析此请求里的签名参数：定位生成位置、算法和入参。' : a.intent === 'reproduce' ? '请在本地复现此请求（抽出签名后用同样的 URL、请求头和请求体，与浏览器结果对比）。' : '';
+        const ini = r.initiator ? `发起者: ${r.initiator.type || ''} ${r.initiator.fn || ''} ${r.initiator.url || ''}:${r.initiator.line ?? ''}` : '发起者: 抓包时未记下调用栈，可用 get_request_initiator';
+        out.push([`【附件·请求 ${r.id}】`, intent, `${r.method} ${r.url}`, `状态: ${r.status ?? '-'} 类型: ${r.type || '-'}`, ini, '请求头:\n' + hdr(r.headers), r.postData ? `请求体: ${String(r.postData).slice(0, 2000)}` : '', r.respHeaders ? '响应头:\n' + hdr(r.respHeaders) : '', body ? `响应体(前 1500 字符，完整用 net_get("${r.id}")): ${body.slice(0, 1500)}` : `响应体用 net_get("${r.id}") 获取`].filter(Boolean).join('\n'));
       } else if (a.kind === 'script') {
         const s = (browser?.scripts || []).find(x => x.id === a.id);
         if (!s) { out.push(`【附件·脚本 ${a.id}】不存在`); continue; }
         const src = fs.readFileSync(s.file, 'utf8');
         out.push(`【附件·脚本 ${s.id}】${s.url}（${src.length} 字符，文件 ${path.relative(projectDir, s.file)}，可用 grep_file/read_file_slice 读取）\n前 2000 字符:\n${src.slice(0, 2000)}`);
       } else if (a.kind === 'snippet') {
-        out.push(`【附件·代码片段${a.label ? ' ' + a.label : ''}】\n${String(a.text || '').slice(0, 8000)}`);
+        const lead = a.intent === 'stack' ? '请根据这段断点调用栈和作用域定位签名函数，并说明下一步。\n' : a.intent === 'selection' ? '请解释这段选中的源码，并指出它和签名参数的关系。\n' : '';
+        out.push(`【附件·代码片段${a.label ? ' ' + a.label : ''}】\n${lead}${String(a.text || '').slice(0, 8000)}`);
       } else if (a.kind === 'file') {
         const p = path.resolve(projectDir, String(a.file || ''));
         if (!p.startsWith(path.resolve(projectDir) + path.sep)) { out.push('【附件·文件】拒绝：仅允许会话项目目录'); continue; }
