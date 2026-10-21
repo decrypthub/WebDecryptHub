@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: UI build
+        run: |
+          npm ci
+          npm run build:ui
+
+      - name: Sidecar Windows compile
+        shell: bash
+        run: |
+          cd sidecar && npm ci && cd ..
+          bun scripts/build-sidecar.mjs win
+          mkdir -p build
+          test -f build/jsra-sidecar.exe
+
+      - name: Bundle Node win-x64 into resources (for installer payload helpers)
+        shell: bash
+        run: |
+          NODE_VER=v20.18.1
+          curl -fsSL "https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-win-x64.zip" -o node.zip
+          powershell -Command "Expand-Archive -Path node.zip -DestinationPath nodepack -Force"
+          mkdir -p src-tauri/resources/node
+          cp -a "nodepack/node-${NODE_VER}-win-x64/." src-tauri/resources/node/
+
+      - name: Tauri build (NSIS + updater artifacts)
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          npm i -D @tauri-apps/cli@2
+          npx tauri build --bundles nsis
+
+      - name: Package dist + latest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          NSIS=$(find src-tauri/target/release/bundle/nsis -type f -name '*.exe' | head -1)
+          test -n "$NSIS"
+          cp "$NSIS" "dist/WebDecryptHub-${VER}-win-x64-setup.exe"
+          UPD=$(find src-tauri/target/release/bundle -type f -name '*nsis.zip' | head -1 || true)
+          SIG=$(find src-tauri/target/release/bundle -type f -name '*nsis.zip.sig' | head -1 || true)
+          if [ -z "$UPD" ]; then
+            # Fallback: sign the setup exe for updater consumers that accept exe
+            UPD="$NSIS"
+            npx tauri signer sign -f "$UPD" || npx tauri signer sign "$UPD"
+            SIG="${UPD}.sig"
+          fi
+          cp "$UPD" "dist/$(basename "$UPD")"
+          cp "$SIG" "dist/$(basename "$SIG")"
+          FNAME=$(basename "$UPD")
+          SIGTEXT=$(tr -d '\r\n' < "$SIG")
+          BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          export VER FNAME BASE SIGTEXT
+          python - <<'PY'
+import json, os, datetime, pathlib
+ver, fname, base, sig = os.environ["VER"], os.environ["FNAME"], os.environ["BASE"], os.environ["SIGTEXT"]
+doc = {
+  "version": ver,
+  "notes": f"WebDecryptHub {ver}",
+  "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+  "platforms": {
+    "windows-x86_64": {"signature": sig, "url": f"{base}/{fname}"}
+  },
+}
+pathlib.Path("dist/latest.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+print("latest.json ->", doc["platforms"]["windows-x86_64"]["url"])
+PY
+          sha256sum dist/* > dist/SHA256SUMS.txt || shasum -a 256 dist/* > dist/SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

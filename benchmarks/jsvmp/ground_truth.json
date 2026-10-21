@@ -1,0 +1,4 @@
+{
+  "mini_vm": { "input": ["PUSH","20","PUSH","22","ADD","HALT"], "expect": 42 },
+  "detect": { "minCandidates": 1, "expectKind": "dispatch-loop" }
+}

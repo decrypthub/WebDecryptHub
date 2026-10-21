@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "WebDecryptHub",
+  "version": "1.2.0",
+  "identifier": "com.webdecrypthub.app",
+  "build": {
+    "frontendDist": "../ui-dist"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "appimage",
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "resources": {
+      "../build/jsra-sidecar.exe": "jsra-sidecar.exe",
+      "../build/jsra-sidecar-linux": "jsra-sidecar-linux"
+    },
+    "linux": {},
+    "windows": {},
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEExMTlBQzk3MzYyRTdEMjIKUldRaWZTNDJsNndab1VNWTBZcmVGSVdXSTRRL2V3TitkTFBLdkVTdVZ3UTI5R1E3d2RCZnBpZE4K",
+      "endpoints": [
+        "https://github.com/decrypthub/WebDecryptHub/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

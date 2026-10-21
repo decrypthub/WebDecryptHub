@@ -1,0 +1,19 @@
+{
+  "clean_result": {
+    "sum": 42,
+    "hi": "Hello, world! (default)",
+    "sigPrefix": "x"
+  },
+  "obfuscator_levels": [
+    "low",
+    "medium",
+    "high"
+  ],
+  "sojson": {
+    "sum": 42,
+    "hiContains": "Hello"
+  },
+  "jsvmp_mini": {
+    "expect": 42
+  }
+}

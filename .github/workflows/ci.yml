@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Linux WebKit deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: UI npm ci + build
+        run: |
+          npm ci
+          npm run build:ui
+
+      - name: Sidecar npm ci
+        working-directory: sidecar
+        run: npm ci
+
+      - name: Sidecar bun compile (linux)
+        run: bun scripts/build-sidecar.mjs linux
+
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check
