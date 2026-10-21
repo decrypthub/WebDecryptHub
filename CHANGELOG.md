@@ -8,6 +8,7 @@
 - 安装程序只结束安装目录里的 WebDecryptHub、sidecar 和捆绑 Node，文件被占用时会先重试。
 - NSIS 安装界面换成产品自己的页眉、侧栏和图标。
 - 安全模式的「本会话始终允许」只留在本次运行的内存里，不再写入 `.agent-state.json`，重启后重新询问。
+- 浏览器关闭超过 8 秒才按 PID 结束进程树，并先确认映像仍是本次启动的 Chrome。
 
 详见 [docs/release-notes/1.3.1.md](docs/release-notes/1.3.1.md)。
 
