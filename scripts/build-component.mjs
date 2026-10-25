@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -36,11 +37,15 @@ for (const item of [
   'node_modules',
   'LICENSE',
   'THIRD_PARTY_NOTICES.md',
+  'README.md',
+  'SOURCE_PROVENANCE.md',
   'package.json',
   'package-lock.json',
 ])
   copy(path.join(root, item), path.join(destination, item), item);
 
+manifest.source={repository:'decrypthub/WebDecryptHub',commit:execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim()};
+manifest.runtime='node';
 manifest.platform = process.platform;
 manifest.arch = process.arch;
 manifest.files = files;
