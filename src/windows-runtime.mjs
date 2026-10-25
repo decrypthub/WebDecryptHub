@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { resolveIn, containsPath } from './paths.mjs';
 const exec = promisify(execFile);
 const systemTool = name => path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', name);
-const processOptions = { windowsHide: true, timeout: 15000, maxBuffer: 1024 * 1024 };
+const processOptions = { windowsHide: true, timeout: 45000, maxBuffer: 1024 * 1024 };
 function helperEnv(extra = {}) { return { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(?:SystemRoot|WINDIR|PATH|PATHEXT|COMSPEC|TEMP|TMP|USERPROFILE|LOCALAPPDATA|APPDATA|ProgramFiles(?:\(x86\))?)$/i.test(key))), ...extra }; }
 let hostPromise;
 export async function hostIntegrity({ fresh = false } = {}) {
@@ -37,7 +37,10 @@ public static class WdhFileIntegrity {
 export async function fileIntegrity(file) {
   if (process.platform !== 'win32') return { rid: null, normal: true };
   const encoded = Buffer.from(READ_LABEL, 'utf16le').toString('base64');
-  const { stdout } = await exec(systemTool('WindowsPowerShell/v1.0/powershell.exe'), ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { ...processOptions, env: helperEnv({ WDH_RUNTIME_FILE: file }) });
+  const { stdout } = await exec(systemTool('WindowsPowerShell/v1.0/powershell.exe'), ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { ...processOptions, env: helperEnv({ WDH_RUNTIME_FILE: file }) }).catch(error => {
+    const code = error.killed ? 'TIMEOUT' : error.code || 'UNKNOWN';
+    throw new Error('Windows 程序完整性检查失败（' + code + '）：' + path.basename(file) + '。请重试；持续失败时检查系统 PowerShell 是否可正常运行。');
+  });
   const rid = Number(stdout.trim()); if (!Number.isFinite(rid)) throw new Error('无法读取程序文件完整性标签'); return { rid, normal: rid >= 8192 };
 }
 export async function requireNormalHost() {

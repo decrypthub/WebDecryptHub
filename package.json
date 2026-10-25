@@ -11,7 +11,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test --test-concurrency=2 test/*.test.mjs",
     "mcp": "node src/cli.mjs mcp",
     "build": "node scripts/build-component.mjs"
   },
