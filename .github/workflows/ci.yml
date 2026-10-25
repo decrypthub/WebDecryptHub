@@ -1,93 +1,22 @@
-name: CI
-
+name: WDH runtime
 on:
-  pull_request:
   push:
-    branches: [main, master]
-
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
 jobs:
-  build-linux:
-    runs-on: ubuntu-latest
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Node
-        uses: actions/setup-node@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24.16.0'
           cache: npm
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Linux WebKit deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libx11-dev libxi-dev
-
-      - name: UI npm ci + build
-        run: |
-          npm ci
-          npm run build:ui
-
-      - name: Sidecar npm ci
-        working-directory: sidecar
-        run: npm ci --ignore-scripts
-
-      - name: Sidecar unit tests
-        working-directory: sidecar
-        run: node --test test/
-
-      - name: Update shutdown checks
-        run: node --test scripts/check-update-shutdown.mjs
-
-      - name: Sidecar bun compile (linux)
-        run: bun scripts/build-sidecar.mjs linux
-
-      - name: cargo check
-        working-directory: src-tauri
-        run: cargo check
-
-      - name: cargo test (embed geometry)
-        working-directory: src-tauri
-        run: cargo test --bins
-
-  # Windows 原生嵌入（windows crate / Win32 SetParent）在 Linux 上无法编译，单独在 Windows 上检查
-  check-windows:
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      - name: Setup Node
-        uses: actions/setup-node@v5
-        with:
-          node-version: '20'
-          cache: npm
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: UI build
-        shell: bash
-        run: |
-          npm ci
-          npm run build:ui
-      - name: Build NSIS installer
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Real payload names, stub bytes. The verify step checks the archived names.
-          mkdir -p build/resources/patchright-core build/resources/node/node_modules/npm/bin
-          printf 'stub' > build/jsra-sidecar.exe
-          printf 'stub' > build/resources/node/node.exe
-          printf 'stub' > build/resources/node/node_modules/npm/bin/npm-cli.js
-          printf '{}\n' > build/resources/patchright-core/package.json
-          npm i -D @tauri-apps/cli@2
-          npx tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
-      - name: Verify installer payload
-        shell: bash
-        run: bash scripts/verify-installer-payload.sh
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm run build

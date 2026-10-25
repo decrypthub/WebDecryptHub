@@ -1,29 +1,22 @@
 # Third-party notices
 
-WebDecryptHub incorporates or depends on the following major third-party components.
-This list is not exhaustive; see each package’s own license in `node_modules` after install.
+WebDecryptHub's own code is MIT licensed. This does not relicense vendored code, dependencies, Chromium or CloakBrowser binaries.
 
-## Vendored
+## Vendored js-reverse-mcp
 
-| Component | Location | License |
-|-----------|----------|---------|
-| js-reverse-mcp (js-reverse-core) | `sidecar/vendor/core-build/` | Apache-2.0 — see `LICENSE` and `NOTICE` in that directory |
+Source: https://github.com/zhizhuodemao/js-reverse-mcp
 
-## Runtime / build (selected)
+Location: `src/vendor/core-build/` (upstream package metadata in `pkg.json`, version 4.0.5).
 
-| Package | License (typical) | Role |
-|---------|-------------------|------|
-| Tauri 2 | MIT / Apache-2.0 | Desktop shell |
-| tauri-plugin-dialog | MIT / Apache-2.0 | Save dialogs |
-| tauri-plugin-updater | MIT / Apache-2.0 | GitHub Releases updates |
-| tauri-plugin-process | MIT / Apache-2.0 | Relaunch after update |
-| React / Vite | MIT | UI |
-| @zhizhuodemao/patchright | Apache-2.0 | Stealth Chromium automation |
-| @babel/* | MIT | AST deobfuscation |
-| webcrack | MIT | Bundle unpack / deobfuscation helper |
-| jsdom | MIT | Optional Node env mode |
-| @modelcontextprotocol/sdk | MIT | MCP protocol types |
-| ws | MIT | WebSocket |
-| zod | MIT | Schema validation |
+License: Apache-2.0, retained at `src/vendor/core-build/LICENSE`. The distribution NOTICE is at `src/vendor/core-build/NOTICE`; source headers, including Google LLC copyrights, remain in place. Local integration modifications include CDP targetId-based page selection and are marked in the changed file. Source extraction provenance is recorded in SOURCE_PROVENANCE.md. This is a downstream integration, not an upstream release or endorsement.
 
-Chromium / Google Chrome is **not** redistributed; the app downloads or uses a local browser at runtime.
+## Selected runtime dependencies
+
+- @zhizhuodemao/patchright: Apache-2.0; browser automation.
+- @modelcontextprotocol/sdk, ws, zod, yauzl: MIT; MCP, transport, schemas and archives.
+- @babel/*, webcrack, jsdom: MIT; upstream analysis utilities.
+- Other packages retain their installed LICENSE / NOTICE files. The component builder preserves them when copying production dependencies.
+
+## Browser binaries
+
+CloakBrowser wrapper code and its browser binaries have separate terms. See the official source and binary license at https://github.com/CloakHQ/cloakbrowser. Users obtain kernels separately; neither this repository nor the component builder redistributes them. Kernel download is optional and explicit. Chromium and Chrome for Testing retain their upstream licenses.

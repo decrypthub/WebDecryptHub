@@ -1,115 +1,64 @@
-<p align="center">
-  <img src="docs/logo.svg" width="96" alt="WebDecryptHub" />
-</p>
+# WebDecryptHub (WDH)
 
-# WebDecryptHub
+独立的浏览器分析 MCP / CLI，作为 [DecryptHub](https://github.com/decrypthub/DecryptHub) 的可选 Web 组件，也可接入其他支持 stdio MCP 的 Agent。
 
-**中文 | [English](#english)**
-
-面向授权安全研究的桌面端 JS 逆向工作台：无边框 Tauri 界面 + Node sidecar + Patchright/CDP，集成网络抓包（HAR）、反调试、指纹追踪、AST 反混淆、VMP 轨迹与 AI Agent。
-
-> **免责声明 / Disclaimer**  
-> 本项目仅供学习与**已获授权**的安全研究使用。请遵守当地法律法规与目标站点服务条款。作者不对滥用行为负责。
-
-官网 / Website: [https://ios.decrypthub.com/](https://ios.decrypthub.com/)
-
-## 截图
-
-| 空会话 | 多会话 | 网络面板 |
-|--------|--------|----------|
-| ![empty](docs/screenshots/01-empty.png) | ![sessions](docs/screenshots/02-multi-session.png) | ![net](docs/screenshots/03-network-list.png) |
-
-| HAR 导出 | AI 对话 |
-|----------|---------|
-| ![har](docs/screenshots/04-har-export.png) | ![ai](docs/screenshots/05-ai-chat.png) |
-
-## 功能
-
-- **浏览器控制**：有头/无头、视口跟随、反调试注入（导航后仍保持）、指纹采集点追踪
-- **网络 / 证据**：CDP 抓包、签名高亮、复制 cURL / Python、HAR 1.2 导出
-- **AI Agent**：OpenAI 兼容 API（可配置 `baseUrl` / model / key），工具调用驱动分析
-- **工作区**：每会话独立目录，`workspace_run` / `workspace_npm`（Windows 安装包捆绑 Node）
-- **AST / VMP / 补环境**：`ast_deobfuscate`（运行时等价检查）、`vmp_trace_*`、`env_iterate`
-- **在线更新**：通过 GitHub Releases（`latest.json`）检查/安装更新
-
-## 架构
-
-```
-+-------------------+     WebSocket      +------------------+
-|  Tauri 2 (UI)     | <----------------> |  jsra-sidecar    |
-|  React + Vite     |   keyring/native   |  Bun/Node + CDP  |
-+---------+---------+                    |  Patchright      |
-          | updater                      +--------+---------+
-          v                                       v
-   GitHub Releases                           Chromium
-```
+WDH = 可替换 Chromium 内核（可选 CloakBrowser）+ 浏览器控制/抓包/调试能力 + MCP。Harness、模型配置、会话历史和桌面窗口由 DecryptHub 单独维护。
 
 ## 快速开始
 
-### 使用安装包（Windows）
+要求 Node.js 24 或更新版本，以及系统 Chrome / Edge，或用户单独安装的 CloakBrowser。
 
-1. 从 [Releases](https://github.com/decrypthub/WebDecryptHub/releases) 下载 `WebDecryptHub-*-win-x64-setup.exe`
-2. 安装后启动，在「设置」中配置 AI：`baseUrl`、`model`、`API Key`（可用环境变量思路：勿把密钥写进仓库）
-3. 新建会话 → 启动浏览器 → 开始分析
-
-### 从源码构建
-
-**依赖**：Node 20+、Bun、Rust stable；Linux 需 WebKitGTK；Windows 需 WebView2。
-
-```bash
-# UI
-npm ci
-npm run build:ui
-
-# Sidecar
-cd sidecar && npm ci --ignore-scripts && cd ..  # isolated-vm uses prebuilds; full rebuild may fail on some Node ABIs
-bun scripts/build-sidecar.mjs linux   # or: win
-
-# Desktop (dev)
-cargo run --manifest-path src-tauri/Cargo.toml
-
-# Linux check
-cargo check --manifest-path src-tauri/Cargo.toml
+```sh
+npm ci --ignore-scripts
+node src/cli.mjs doctor
+node src/cli.mjs mcp --browser system --root /absolute/workspace
 ```
 
-Windows 正式安装包由 GitHub Actions 在推送 `v*` 标签时构建（见 `.github/workflows/release.yml`）。
+MCP 客户端配置（将路径替换为实际绝对路径）：
 
-### AI 提供商
+```json
+{
+  "mcpServers": {
+    "wdh": {
+      "command": "node",
+      "args": ["/absolute/WebDecryptHub/src/cli.mjs", "mcp", "--browser", "system", "--root", "/absolute/workspace", "--data-dir", "/absolute/wdh-data"]
+    }
+  }
+}
+```
 
-在设置中选择 OpenAI 兼容端点，例如：
+默认 browser 为 cloak。使用系统浏览器时请明确指定 `--browser system`。自定义内核使用 `--browser custom --executable <绝对路径>`，无头模式加 `--headless`。不同 MCP 实例应使用不同 data-dir，避免争用同一个持久化浏览器 Profile。
 
-- `baseUrl`: `https://api.openai.com/v1`（或你的网关）
-- `model`: 任意 chat completions 模型名
-- `apiKey`: 仅保存在系统凭据库 / 本地，**不要提交到 Git**
+安装 CloakBrowser：
 
-也可在开发时用环境变量注入密钥到测试脚本，应用本身通过设置页与 keyring 读取。
+```sh
+node src/cli.mjs kernel install cloak
+node src/cli.mjs mcp --browser cloak --root /absolute/workspace
+```
 
-### 自动更新
+内核下载遵循官方 Release 和独立二进制条款；WDH 源码及组件包不附带 Cloak 或 Chromium 二进制。
 
-应用会在启动后静默检查  
-`https://github.com/decrypthub/WebDecryptHub/releases/latest/download/latest.json`  
-也可在「设置 → 软件更新」手动检查、查看说明并安装重启。  
-签名公钥嵌入 `src-tauri/tauri.conf.json`；私钥仅存在于发布 CI 的 Secrets。
+## 工具
 
-## 许可证
+- `browser_*`：导航、页面快照、元素输入、截图、网络记录和响应体。
+- `discover_tools`，group 为 `debugger`：加载当前调试器的真实工具 schema；支持搜索脚本、断点、调用栈、变量、单步与恢复、请求发起栈等能力。
+- 指纹观测和反调试工具：按需观测站点读取的 API，不自动修改用户的 Agent 权限。
 
-- 本仓库源码：**MIT**（见 [LICENSE](./LICENSE)）
-- 内置 `sidecar/vendor/core-build`（js-reverse-mcp）：**Apache-2.0**（见该目录 `LICENSE` / `NOTICE`）
-- 其他依赖见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)
+浏览器工具默认可用，调试工具按需加载。复杂 JSVM / WASM 的完整语义还原不是现成保证；采样、追踪限额和证据验证需要按目标单独设计。本轮重点是把已有能力独立运行与维护。
 
----
+## 测试和组件构建
 
-<a id="english"></a>
+```sh
+npm test
+npm run build
+```
 
-## English
+测试使用本机浏览器和本地 HTTP 样本，覆盖 DOM、抓包、源码搜索、真实断点/单步/恢复、过期目标和文件路径边界。设置 `WDH_TEST_EXECUTABLE` 可使用指定内核重复测试。
 
-WebDecryptHub is a desktop JS reverse-engineering workbench for **authorized** security research: frameless Tauri UI, Node sidecar, Patchright/CDP, network/HAR capture, anti-debug & fingerprint hooks, AST/VMP tooling, and an OpenAI-compatible AI agent.
+构建目录记录在 `dist/latest-component.txt`，包含源码、生产依赖和逐文件 SHA-256。它供 DecryptHub 的显式本地组件安装器使用；不等同于已签名 GitHub 发行版。安装步骤见 [DecryptHub 组件文档](https://github.com/decrypthub/DecryptHub/blob/main/docs/components.md)。
 
-**Disclaimer:** For learning and authorized research only. Comply with applicable law and site Terms of Service.
+## 安全与来源
 
-- Site: [https://ios.decrypthub.com/](https://ios.decrypthub.com/)
-- Screenshots: see `docs/screenshots/`
-- Build: Node 20 + Bun + Rust; `npm ci && npm run build:ui`, `bun scripts/build-sidecar.mjs`, `cargo run --manifest-path src-tauri/Cargo.toml`
-- Updates: GitHub Releases `latest.json` via `tauri-plugin-updater`
-- License: MIT (vendored js-reverse-mcp remains Apache-2.0)
+MCP 客户端负责审批工具操作。`--root` 限定输出文件，不是操作系统沙箱。不要向模型暴露 `--desktop` 宿主控制通道；它仅供拥有该 stdio 子进程的 DecryptHub 使用。请求和响应可能含敏感信息，按工作项目单独管理 data-dir。
 
+由原 WebDecryptHub 桌面仓库拆分，保留 Git 历史；来源见 [SOURCE_PROVENANCE.md](SOURCE_PROVENANCE.md)。包含 [js-reverse-mcp](https://github.com/zhizhuodemao/js-reverse-mcp) 的修改版本，保留 Apache-2.0 LICENSE/NOTICE 和 Google LLC 等源文件版权声明。WDH 自有代码采用 MIT，第三方代码遵循各自协议。参见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
