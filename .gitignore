@@ -1,56 +1,14 @@
-# Dependencies & build
 node_modules/
-sidecar/node_modules/
-ui-dist/
 dist/
-build/
-pkg/
-src-tauri/target/
-src-tauri/gen/
-*.exe
-*.dll
-*.AppImage
-*.deb
-*.msi
-*.sig
-*.nsis.zip
-
-# Sidecar compile scratch
-sidecar/.entry.mjs
-sidecar/.pw-res.zip
-
-# OS / editor
-.DS_Store
-Thumbs.db
-*.swp
-.idea/
-.vscode/
+.tmp/
 *.log
-
-# Local secrets & env (never commit)
 .env
 .env.*
+*.har
 *.pem
 *.key
-secrets/
-wdh.key
-wdh.key.password
-
-# Captures / e2e / personal
-**/captures/
-**/*.har
-**/llm-e2e/
-**/screens/
-shot.png
-PROGRESS.md
-PROGRESS-*.json
-CHANGES.md
-
-# Benchmark workdirs / real-world third-party captures (do not add)
-benchmarks/results/
-benchmarks/realworld/
-benchmarks/node_modules/
-
-# Updater local test
-/tmp/
-updater-test/
+*.exe
+*.dll
+.DS_Store
+/.tmp-*
+*.tsbuildinfo

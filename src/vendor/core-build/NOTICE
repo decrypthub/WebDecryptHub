@@ -1,0 +1,10 @@
+js-reverse-mcp
+Copyright contributors to js-reverse-mcp
+
+This product includes software developed as js-reverse-mcp
+(https://github.com/zhizhuodemao/js-reverse-mcp), licensed under the Apache License,
+Version 2.0. See LICENSE in this directory.
+
+This distribution contains local modifications for the DecryptHub desktop
+integration, including CDP targetId-based page selection. Original source-file
+copyright and license notices are retained.
