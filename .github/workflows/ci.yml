@@ -20,3 +20,8 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm test
       - run: npm run build
+      - run: node scripts/package-component.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wdh-component-${{ runner.os }}
+          path: dist/wdh-*.zip*

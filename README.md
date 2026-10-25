@@ -62,3 +62,5 @@ npm run build
 MCP 客户端负责审批工具操作。`--root` 限定输出文件，不是操作系统沙箱。不要向模型暴露 `--desktop` 宿主控制通道；它仅供拥有该 stdio 子进程的 DecryptHub 使用。请求和响应可能含敏感信息，按工作项目单独管理 data-dir。
 
 由原 WebDecryptHub 桌面仓库拆分，保留 Git 历史；来源见 [SOURCE_PROVENANCE.md](SOURCE_PROVENANCE.md)。包含 [js-reverse-mcp](https://github.com/zhizhuodemao/js-reverse-mcp) 的修改版本，保留 Apache-2.0 LICENSE/NOTICE 和 Google LLC 等源文件版权声明。WDH 自有代码采用 MIT，第三方代码遵循各自协议。参见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+维护者可在 `npm run build` 后运行 `node scripts/package-component.mjs`，生成以平台命名的 ZIP 和 SHA-256。Desktop 插件目录只识别 `wdh-<版本>-<平台>-<架构>.zip`，不会把旧桌面安装包当作 WDH 插件。
