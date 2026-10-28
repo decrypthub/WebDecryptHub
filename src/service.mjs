@@ -168,6 +168,7 @@ export class WebRuntime {
       case 'hello':
         return {
           apiVersion: API_VERSION,
+          capabilities: { pageTabs: true },
           version: VERSION,
           tools: BROWSER_TOOLS.map(({ name, description, schema, group }) => ({
             name,
@@ -187,8 +188,19 @@ export class WebRuntime {
         await this.browser.navigate(args.url);
         return this.status();
       case 'select':
-        await this.browser.setActive(this.browser.pages[args.index]);
+        {
+          const index = args.pageId ? this.status().pages.findIndex(p => p.id === args.pageId) : args.index;
+          if (!Number.isInteger(index) || !this.browser.pages[index]) throw Error('浏览器标签页已关闭，请重新列出');
+          await this.browser.selectPage(index);
+        }
         return this.status();
+      case 'close-page': {
+        const index = this.status().pages.findIndex(p => p.id === args.pageId);
+        const page = this.browser.pages[index];
+        if (!page) throw Error('浏览器标签页已关闭，请重新列出');
+        await page.close();
+        return this.status();
+      }
       case 'new-page':
         await this.browser.newPage(args.url);
         return this.status();

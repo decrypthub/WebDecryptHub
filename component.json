@@ -1,10 +1,15 @@
 {
   "manifestVersion": 1,
   "id": "wdh",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "apiVersion": 1,
   "entrypoint": "src/cli.mjs",
   "node": ">=24",
-  "capabilities": ["web.browser", "web.capture", "web.debugger", "web.fingerprint"],
+  "capabilities": [
+    "web.browser",
+    "web.capture",
+    "web.debugger",
+    "web.fingerprint"
+  ],
   "browserBinariesIncluded": false
 }
