@@ -82,7 +82,7 @@ class BrowserManager extends EventEmitter {
     return true;
   }
 
-  async launch({ executablePath, headless, profileDir, isolated, projectDir, proxy, embed }) {
+  async launch({ executablePath, headless, profileDir, isolated, projectDir, proxy, embed, dock }) {
     if (executablePath) await requireNormalExecutable(executablePath);
     await this.close();
     this.projectDir = projectDir;
@@ -93,6 +93,9 @@ class BrowserManager extends EventEmitter {
     this.headless = !!headless;
     const vw = this.fit?.width || 1366, vh = this.fit?.height || 850;
     if (headless) args.push(`--window-size=${vw},${vh}`);
+    // 伪嵌入：先放到屏幕外，等宿主用 CDP 把窗口停靠到面板矩形，避免闪一下。
+    this.dock = !!dock && !headless;
+    if (this.dock) args.push('--window-position=-32000,-32000', `--window-size=${vw},${vh}`, '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding');
     // Windows 嵌入模式：窗口先放到屏幕外（不闪现），等 Rust 侧 SetParent 进主窗口后再显示；
     // 被遮挡/隐藏的会话也要持续渲染（回落 screencast 时仍有画面）
     this.embed = !!embed && !headless; this.embedFailed = false; this.chromePid = null;
@@ -139,7 +142,7 @@ class BrowserManager extends EventEmitter {
   status() {
     return {
       running: this.running, cdpPort: this.cdpPort, capturePaused: this.net.paused,
-      embed: this.embedActive, chromePid: this.embedActive ? this.chromePid : null,
+      embed: this.embedActive, dock: !!(this.dock && this.running), chromePid: this.embedActive ? this.chromePid : null,
       pages: this.pages.map((p, i) => ({ index: i, url: safe(() => p.url()), active: p === this.activePage })),
     };
   }
@@ -299,6 +302,24 @@ class BrowserManager extends EventEmitter {
 
   clearRequests() { this.requests = []; this._dirty.clear(); this.emit('requests-cleared'); }
 
+  // 伪嵌入：CDP Browser 域移动/缩放/最小化真实窗口，不需要辅助功能权限。
+  async dockWindow({ left, top, width, height, hidden } = {}) {
+    if (!this.context) throw Error('浏览器尚未启动');
+    const browser = this.context.browser();
+    if (!browser) throw Error('当前配置不支持窗口停靠');
+    const session = await browser.newBrowserCDPSession();
+    try {
+      const { targetInfos } = await session.send('Target.getTargets');
+      const page = targetInfos.find(target => target.type === 'page');
+      if (!page) throw Error('没有可停靠的页面');
+      const { windowId } = await session.send('Browser.getWindowForTarget', { targetId: page.targetId });
+      const bounds = hidden
+        ? { windowState: 'minimized' }
+        : { windowState: 'normal', left: Math.round(left), top: Math.round(top), width: Math.round(width), height: Math.round(height) };
+      await session.send('Browser.setWindowBounds', { windowId, bounds });
+      return { ok: true, windowId };
+    } finally { await session.detach().catch(() => {}); }
+  }
   async close() {
     try { await this.injector.disarm?.(); } catch {}
     this.injector.resetContext();

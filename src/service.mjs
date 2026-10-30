@@ -62,7 +62,7 @@ export class WebRuntime {
         needChrome: true,
         error:
           config.kernel === 'cloak'
-            ? 'CloakBrowser 尚未安装。运行 wdh kernel install cloak，或选择系统 Chrome / Edge。'
+            ? 'CloakBrowser 尚未安装。运行 wdh kernel install cloak，或在桌面插件页下载内核。'
             : '所选浏览器未安装或路径无效。',
       };
     await this.mcp.stop();
@@ -74,6 +74,7 @@ export class WebRuntime {
       projectDir: this.dataDir,
       proxy: config.proxy,
       embed: this.desktop && config.embed,
+      dock: this.desktop && config.dock,
     });
     if (config.antiDebug) {
       this.browser.injector.antiDebug = true;
@@ -180,6 +181,8 @@ export class WebRuntime {
         };
       case 'launch':
         return this.launch(args);
+      case 'dock':
+        return this.browser.dockWindow(args);
       case 'close':
         await this.mcp.stop();
         await this.browser.close();
