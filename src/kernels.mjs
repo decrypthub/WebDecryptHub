@@ -15,14 +15,23 @@ export function repositoryName(value = 'CloakHQ/cloakbrowser') {
   if (!/^[\w.-]+\/[\w.-]+$/.test(v) || v.includes('..')) throw new Error('填写 GitHub 仓库 owner/repo');
   return v;
 }
-export function chooseAsset(release, { asset, platform = process.platform, arch = process.arch } = {}) {
-  const all = (release.assets || []).filter(a => /\.(zip|tar\.gz)$/i.test(a.name));
-  if (asset) { const a = all.find(a => a.name === asset); if (!a) throw new Error('未找到 Release 文件：' + asset); return a; }
+export function archiveAssets(release) {
+  return ((release || {}).assets || []).filter(a => /\.(zip|tar\.gz)$/i.test(a.name));
+}
+// 返回与当前平台/架构匹配的唯一文件；不匹配时返回 null（用于跨 Release 查找）。
+export function matchAsset(release, { asset, platform = process.platform, arch = process.arch } = {}) {
+  const all = archiveAssets(release);
+  if (asset) return all.find(a => a.name === asset) || null;
   const platforms = platform === 'win32' ? /windows|win(?:32|64|-)/i : platform === 'darwin' ? /darwin|mac/i : /linux/i;
   const arches = arch === 'arm64' ? /arm64|aarch64/i : /x64|amd64|win64|x86_64/i;
   const found = all.filter(a => platforms.test(a.name) && arches.test(a.name));
-  if (found.length !== 1) throw new Error('请指定当前系统的 Release 文件名。可选：' + all.map(a => a.name).join(', '));
-  return found[0];
+  return found.length === 1 ? found[0] : null;
+}
+export function chooseAsset(release, options = {}) {
+  const target = matchAsset(release, options);
+  if (target) return target;
+  if (options.asset) throw new Error('未找到 Release 文件：' + options.asset);
+  throw new Error('请指定当前系统的 Release 文件名。可选：' + archiveAssets(release).map(a => a.name).join(', '));
 }
 async function response(url, fetcher, ms = 20000) {
   const r = await fetcher(url, { signal: AbortSignal.timeout(ms), headers: { 'User-Agent': 'WebDecryptHub', Accept: 'application/vnd.github+json' } });
@@ -54,18 +63,39 @@ export async function probeKernel(userData, executablePath) {
     return { ok: true, title, path: executablePath };
   } catch (e) {
     const message = String(e.message).replace(/\x1b\[[0-9;]*m/g, ''), code = message.match(/exitCode=(\d+)|spawn (\w+)/);
-    return { ok: false, error: '内核启动检查失败：' + (code ? code[0] : message.split('\n')[0]).slice(0, 500) + '。可以继续使用系统 Chrome / Edge，或更换自定义内核。' };
+    return { ok: false, error: '内核启动检查失败：' + (code ? code[0] : message.split('\n')[0]).slice(0, 500) + '。可以重新下载内核后再试。' };
   } finally { await browser.close(); resolveIn(root, path.relative(root, directory)); try { fs.rmSync(directory, { recursive: true, force: true }); } catch {} }
 }
 export async function extractKernel(archive, dir) {
   if (archive.endsWith('.zip')) return extractZip(archive, { dir });
-  const tar = await import('tar'); let bytes = 0, entries = 0;
+  const tar = await import('tar'); let bytes = 0, entries = 0, problem = ''; const links = [];
+  // tar 的 filter 抛错会冒成未捕获异常（旧实现会直接带栈退出）；这里跳过该条目并留到解压后统一报错。
   await tar.x({ file: archive, cwd: dir, strict: true, preservePaths: false, filter(name, entry) {
-    resolveIn(dir, name);
-    if (++entries > 100000 || (bytes += entry.size || 0) > 2 * MAX || entry.size > 512e6) throw new Error('内核解压超过限制');
-    if (!['File', 'Directory', 'OldFile'].includes(entry.type)) throw new Error('内核包含链接或特殊文件');
-    return true;
+    if (problem) return false;
+    try {
+      resolveIn(dir, name);
+      if (++entries > 100000 || (bytes += entry.size || 0) > 2 * MAX || entry.size > 512e6) { problem = '内核解压超过限制'; return false; }
+      // macOS 的 .app 必须保留框架内部的相对符号链接；只接受解码后仍落在目录内的链接，
+      // 解压完成后再用 realpath 复核一次，防止链式链接逃逸。
+      if (entry.type === 'SymbolicLink') {
+        const target = String(entry.linkpath || '');
+        if (!target || path.isAbsolute(target)) { problem = '内核包含指向目录外的链接'; return false; }
+        resolveIn(dir, path.join(path.dirname(name), target));
+        links.push(name);
+        return true;
+      }
+      if (!['File', 'Directory', 'OldFile'].includes(entry.type)) { problem = '内核包含链接或特殊文件'; return false; }
+      return true;
+    } catch (error) { problem = error.message; return false; }
   } });
+  if (problem) throw new Error(problem);
+  if (!links.length) return;
+  const root = fs.realpathSync(dir);
+  for (const name of links) {
+    let resolved;
+    try { resolved = fs.realpathSync(path.resolve(dir, name)); } catch { throw new Error('内核链接无法解析：' + name); }
+    if (resolved !== root && !resolved.startsWith(root + path.sep)) throw new Error('内核链接指向目录外：' + name);
+  }
 }
 function findExecutable(dir, requested) {
   if (requested) { const f = resolveIn(dir, requested); if (!fs.statSync(f).isFile()) throw new Error('指定的浏览器程序不存在'); return f; }
@@ -74,15 +104,29 @@ function findExecutable(dir, requested) {
   if (!files.length) throw new Error('压缩包内未找到 Chromium 程序，请指定包内可执行文件路径');
   return resolveIn(dir, files[0]);
 }
+// 官方把不同平台的构建分散在多个 Release（新版本可能只发布 Linux/Windows）。按新到旧找到第一个
+// 真正含当前平台文件的版本，避免 macOS 停留在最新 Release 的 Linux/Windows 包上直接失败。
+export function selectRelease(releases, options = {}) {
+  for (const candidate of releases) {
+    const asset = matchAsset(candidate, options);
+    if (asset) return { release: candidate, asset };
+  }
+  if (options.asset) throw new Error('未找到 Release 文件：' + options.asset);
+  const names = [...new Set(releases.flatMap(r => archiveAssets(r).map(a => a.name)))];
+  throw new Error(names.length
+    ? '没有找到支持当前系统的内核文件，请指定 Release 文件名。可选：' + names.join(', ')
+    : '没有找到可下载的浏览器 Release，请填写版本标签');
+}
 export async function downloadGithub(userData, options = {}, progress = () => {}, fetcher = fetch) {
   await requireNormalHost();
   const repository = repositoryName(options.repository), cloak = repository.toLowerCase() === 'cloakhq/cloakbrowser', kind = cloak ? 'cloak' : 'github';
   progress({ phase: 'metadata', source: 'GitHub', got: 0, total: 0 });
   const api = 'https://api.github.com/repos/' + repository + '/releases';
   const data = JSON.parse((await small(api + (options.tag ? '/tags/' + encodeURIComponent(options.tag) : '?per_page=30'), fetcher)).toString());
-  const release = Array.isArray(data) ? data.find(r => !r.draft && !r.prerelease && (!cloak || /^chromium-v/.test(r.tag_name)) && (r.assets || []).some(a => /\.(zip|tar\.gz)$/.test(a.name))) : data;
-  if (!release?.tag_name) throw new Error('没有找到可下载的浏览器 Release，请填写版本标签');
-  const asset = chooseAsset(release, options);
+  const list = Array.isArray(data)
+    ? data.filter(r => !r.draft && !r.prerelease && (!cloak || /^chromium-v/.test(String(r.tag_name))))
+    : [data];
+  const { release, asset } = selectRelease(list, options);
   const url = String(asset.browser_download_url || '');
   if (!url.toLowerCase().startsWith(('https://github.com/' + repository + '/releases/download/').toLowerCase())) throw new Error('只接受该仓库的 GitHub Release 下载地址');
   let expected = options.sha256 || String(asset.digest || '').replace(/^sha256:/, ''), signed = false;
