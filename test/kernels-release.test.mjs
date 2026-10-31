@@ -1,7 +1,13 @@
 // 内核 Release 选择：官方把不同平台的构建放在不同 Release，必须按平台找到真正可用的那一个。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { matchAsset, selectRelease } from '../src/kernels.mjs';
+import { matchAsset, selectRelease, githubHeaders } from '../src/kernels.mjs';
+
+test('GitHub requests carry a token when one is configured', () => {
+  const withToken = githubHeaders({ DECRYPTHUB_GITHUB_TOKEN: 'fixture-token' });
+  assert.equal(withToken.Authorization, 'Bearer fixture-token');
+  assert.equal(githubHeaders({}).Authorization, undefined);
+});
 
 const asset = (name) => ({ name, browser_download_url: 'https://github.com/CloakHQ/cloakbrowser/releases/download/t/' + name, size: 1 });
 const release = (tag, names) => ({ tag_name: tag, assets: names.map(asset) });

@@ -33,8 +33,13 @@ export function chooseAsset(release, options = {}) {
   if (options.asset) throw new Error('未找到 Release 文件：' + options.asset);
   throw new Error('请指定当前系统的 Release 文件名。可选：' + archiveAssets(release).map(a => a.name).join(', '));
 }
+// GitHub 对匿名请求限流很严（60 次/小时）；CI 与桌面用户可以通过环境变量提供只读 token。
+export function githubHeaders(env = process.env) {
+  const token = env.DECRYPTHUB_GITHUB_TOKEN || env.GITHUB_TOKEN || '';
+  return { 'User-Agent': 'WebDecryptHub', Accept: 'application/vnd.github+json', ...(token ? { Authorization: 'Bearer ' + token } : {}) };
+}
 async function response(url, fetcher, ms = 20000) {
-  const r = await fetcher(url, { signal: AbortSignal.timeout(ms), headers: { 'User-Agent': 'WebDecryptHub', Accept: 'application/vnd.github+json' } });
+  const r = await fetcher(url, { signal: AbortSignal.timeout(ms), headers: githubHeaders() });
   if (!r.ok) throw new Error(`GitHub HTTP ${r.status}：${r.status === 403 ? '请求受限，请稍后再试' : url}`);
   return r;
 }
