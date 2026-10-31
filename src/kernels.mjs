@@ -33,12 +33,85 @@ export function chooseAsset(release, options = {}) {
   if (options.asset) throw new Error('未找到 Release 文件：' + options.asset);
   throw new Error('请指定当前系统的 Release 文件名。可选：' + archiveAssets(release).map(a => a.name).join(', '));
 }
-async function response(url, fetcher, ms = 20000) {
-  const r = await fetcher(url, { signal: AbortSignal.timeout(ms), headers: { 'User-Agent': 'WebDecryptHub', Accept: 'application/vnd.github+json' } });
-  if (!r.ok) throw new Error(`GitHub HTTP ${r.status}：${r.status === 403 ? '请求受限，请稍后再试' : url}`);
+// 未登录的 GitHub API 每小时只有 60 次额度，用尽即返回 403；配置令牌可提升到 5000 次。
+// api=false 用于公开网页：github.com 会拒绝 API 的 Accept 类型（406），也不能带令牌。
+function githubHeaders(api = true) {
+  const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+  return {
+    'User-Agent': 'WebDecryptHub',
+    Accept: api ? 'application/vnd.github+json' : 'text/html,application/xhtml+xml',
+    ...(api && token ? { Authorization: 'Bearer ' + token } : {}),
+  };
+}
+function rateLimited(status, resetAt) {
+  const at = resetAt ? new Date(resetAt * 1000) : null;
+  const when = at && !Number.isNaN(at.getTime()) ? '，额度约 ' + at.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) + ' 恢复' : '';
+  const err = new Error(`GitHub 请求受限（HTTP ${status}）${when}。可设置 GH_TOKEN 环境变量提升额度。`);
+  err.status = status;
+  err.resetAt = resetAt || 0;
+  return err;
+}
+async function response(url, fetcher, ms = 20000, api = true) {
+  const r = await fetcher(url, { signal: AbortSignal.timeout(ms), headers: githubHeaders(api) });
+  if (!r.ok) {
+    // 限流单独区分，调用方据此改走不需要 API 额度的网页通道。
+    if (r.status === 403 || r.status === 429) throw rateLimited(r.status, Number(r.headers?.get?.('x-ratelimit-reset')) || 0);
+    throw new Error(`GitHub HTTP ${r.status}：${url}`);
+  }
   return r;
 }
-async function small(url, fetcher) { const r = await response(url, fetcher); const chunks = []; let n = 0; for await (const c of r.body) { if ((n += c.length) > 2e6) throw new Error('下载元数据过大'); chunks.push(c); } return Buffer.concat(chunks); }
+async function small(url, fetcher, api = true) { const r = await response(url, fetcher, 20000, api); const chunks = []; let n = 0; for await (const c of r.body) { if ((n += c.length) > 2e6) throw new Error('下载元数据过大'); chunks.push(c); } return Buffer.concat(chunks); }
+// API 额度用尽时改走网页通道：/releases 列出标签，expanded_assets 片段列出该标签下的文件。
+// 两者都是公开页面，不消耗 API 额度；解析结果与 API 返回的 { tag_name, assets } 形状保持一致。
+export function parseReleaseTags(html) {
+  const re = /\/releases\/tag\/([^"'<>?\s]+)/g, out = [], seen = new Set();
+  let m;
+  while ((m = re.exec(html))) {
+    let tag; try { tag = decodeURIComponent(m[1]); } catch { continue; }
+    if (!tag || seen.has(tag)) continue;
+    seen.add(tag); out.push(tag);
+  }
+  return out;
+}
+export function parseReleaseAssets(html, repository) {
+  const prefix = '/' + String(repository).toLowerCase() + '/releases/download/', out = [], seen = new Set();
+  const re = /href="([^"]+)"/g;
+  let m;
+  while ((m = re.exec(html))) {
+    const href = m[1].replace(/&amp;/g, '&');
+    if (!href.toLowerCase().startsWith(prefix)) continue;
+    const clean = href.split('?')[0].split('#')[0];
+    let name; try { name = decodeURIComponent(clean.slice(clean.lastIndexOf('/') + 1)); } catch { continue; }
+    if (!name || seen.has(name)) continue;
+    seen.add(name); out.push({ name, browser_download_url: 'https://github.com' + clean });
+  }
+  return out;
+}
+export async function releasesFromHtml(repository, fetcher, { tag, pages = 3, want = 3, concurrency = 4 } = {}) {
+  const read = async (url) => (await small(url, fetcher, false)).toString('utf8');
+  // 官方把构建分散在多个 Release，且新版本可能只有签名清单，所以要逐页找、逐版本确认。
+  let tags;
+  if (tag) tags = [tag];
+  else {
+    tags = [];
+    for (let page = 1; page <= pages; page++) {
+      const found = parseReleaseTags(await read(`https://github.com/${repository}/releases?page=${page}`));
+      if (!found.length) break;
+      for (const t of found) if (!tags.includes(t)) tags.push(t);
+    }
+  }
+  const releases = [];
+  for (let i = 0; i < tags.length && releases.length < want; i += concurrency) {
+    const batch = tags.slice(i, i + concurrency);
+    const html = await Promise.all(batch.map((t) => read(`https://github.com/${repository}/releases/expanded_assets/${encodeURIComponent(t)}`)));
+    batch.forEach((t, index) => {
+      if (releases.length >= want) return;
+      const assets = parseReleaseAssets(html[index], repository);
+      if (assets.some(a => /\.(zip|tar\.gz)$/i.test(a.name))) releases.push({ tag_name: t, assets });
+    });
+  }
+  return releases;
+}
 export function verifyCloak(manifest, signature, version, asset) {
   const text = signature.toString().trim(), sig = Buffer.from(text, 'base64');
   const key = crypto.createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: Buffer.from(CLOAK_KEY, 'base64').toString('base64url') }, format: 'jwk' });
@@ -122,10 +195,19 @@ export async function downloadGithub(userData, options = {}, progress = () => {}
   const repository = repositoryName(options.repository), cloak = repository.toLowerCase() === 'cloakhq/cloakbrowser', kind = cloak ? 'cloak' : 'github';
   progress({ phase: 'metadata', source: 'GitHub', got: 0, total: 0 });
   const api = 'https://api.github.com/repos/' + repository + '/releases';
-  const data = JSON.parse((await small(api + (options.tag ? '/tags/' + encodeURIComponent(options.tag) : '?per_page=30'), fetcher)).toString());
-  const list = Array.isArray(data)
-    ? data.filter(r => !r.draft && !r.prerelease && (!cloak || /^chromium-v/.test(String(r.tag_name))))
-    : [data];
+  let list;
+  try {
+    const data = JSON.parse((await small(api + (options.tag ? '/tags/' + encodeURIComponent(options.tag) : '?per_page=30'), fetcher)).toString());
+    list = Array.isArray(data)
+      ? data.filter(r => !r.draft && !r.prerelease && (!cloak || /^chromium-v/.test(String(r.tag_name))))
+      : [data];
+  } catch (e) {
+    // 未登录额度用尽（403/429）时改走网页通道，避免用户只能看到“请稍后再试”。
+    if (e.status !== 403 && e.status !== 429) throw e;
+    progress({ phase: 'metadata', source: 'GitHub 网页', got: 0, total: 0 });
+    list = await releasesFromHtml(repository, fetcher, { tag: options.tag });
+    if (!list.length) throw new Error(e.message + ' 网页备用通道也没有找到可下载的 Release。');
+  }
   const { release, asset } = selectRelease(list, options);
   const url = String(asset.browser_download_url || '');
   if (!url.toLowerCase().startsWith(('https://github.com/' + repository + '/releases/download/').toLowerCase())) throw new Error('只接受该仓库的 GitHub Release 下载地址');
