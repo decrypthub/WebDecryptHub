@@ -294,28 +294,43 @@ export const evaluateScript = defineTool({
             }
             const callFrameId = pausedState.callFrames[frameIdx]?.callFrameId;
             if (callFrameId) {
-                const result = await debugger_.evaluateSettledPromiseOnCallFrame(callFrameId, `(${wrapPausedResult()})()`);
-                if (result.exceptionDetails) {
-                    const errMsg = result.exceptionDetails.exception?.description ||
-                        result.exceptionDetails.text;
-                    throw new ToolError('CDP_ERROR', `Script evaluation error: ${errMsg}`);
+                let result;
+                try {
+                    result = await debugger_.evaluateSettledPromiseOnCallFrame(callFrameId, `(${wrapPausedResult()})()`);
                 }
-                if (result.settledPromise &&
-                    (result.result.subtype === 'arraybuffer' ||
-                        result.result.subtype === 'typedarray')) {
-                    throw new ToolError('PRECONDITION_FAILED', 'Paused async binary results cannot be serialized safely. Resume execution or return JSON-serializable data.');
+                catch (error) {
+                    // 本地 isPaused 与 CDP 真实状态不一致（disable/enable 之后很常见）。
+                    // 以 CDP 为准修正状态，然后退化为页面求值，而不是把这一路彻底堵死。
+                    if (/Can only perform operation while paused|not paused|no longer paused/i.test(String(error?.message || ''))) {
+                        debugger_.markRunning();
+                        response.appendResponseLine('ℹ️ Paused state was stale (page is already running); falling back to page evaluation.');
+                        result = null;
+                    }
+                    else throw error;
                 }
-                const settledValue = result.settledPromise && result.result.objectId
-                    ? await debugger_.materializeRemoteObject(result.result)
-                    : result.result.value;
-                const rawResult = result.settledPromise
-                    ? JSON.stringify({
-                        type: 'json',
-                        data: JSON.stringify(settledValue),
-                    })
-                    : settledValue;
-                await handleEvalResult(rawResult);
-                return;
+                if (result) {
+                    if (result.exceptionDetails) {
+                        const errMsg = result.exceptionDetails.exception?.description ||
+                            result.exceptionDetails.text;
+                        throw new ToolError('CDP_ERROR', `Script evaluation error: ${errMsg}`);
+                    }
+                    if (result.settledPromise &&
+                        (result.result.subtype === 'arraybuffer' ||
+                            result.result.subtype === 'typedarray')) {
+                        throw new ToolError('PRECONDITION_FAILED', 'Paused async binary results cannot be serialized safely. Resume execution or return JSON-serializable data.');
+                    }
+                    const settledValue = result.settledPromise && result.result.objectId
+                        ? await debugger_.materializeRemoteObject(result.result)
+                        : result.result.value;
+                    const rawResult = result.settledPromise
+                        ? JSON.stringify({
+                            type: 'json',
+                            data: JSON.stringify(settledValue),
+                        })
+                        : settledValue;
+                    await handleEvalResult(rawResult);
+                    return;
+                }
             }
         }
         if (mainWorld) {

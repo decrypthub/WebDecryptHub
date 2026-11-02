@@ -262,6 +262,20 @@ export class WebRuntime {
       case 'debugger-stop':
         await this.mcp.stop();
         return true;
+      case 'debugger-rebind': {
+        // Self-healing path: the debugger mirror can drift out of sync with CDP
+        // after the CDP session is re-created (page switch, frame switch, host
+        // rebind). Tearing the kernel connection down and re-binding gives a
+        // clean target instead of leaving callers with contradictory states.
+        await this.mcp.stop();
+        await this.ensureDebugger(args.allowedRoot || this.root);
+        await this.bindTarget();
+        return {
+          tools: [...FINGERPRINT_TOOLS, ...ANTIDEBUG_TOOLS]
+            .map(({ name, description, schema }) => ({ name, description, inputSchema: schema }))
+            .concat(this.mcp.tools),
+        };
+      }
       case 'debugger-bind':
         await this.bindTarget();
         return true;

@@ -90,7 +90,12 @@ export class DebuggerContext {
             this.#breakpoints.clear();
             this.#xhrBreakpoints.clear();
         }
-        this.#pausedState = { isPaused: false, callFrames: [] };
+        // 关键：页面可能仍停在断点上，而 disable 摘掉了 Debugger.resumed 监听，
+        // 之后再也不会有人把状态改回 running。这里不能谎报「已恢复」，
+        // 而是记成 unknown，由下一次真实操作（或 get_paused_info）与 CDP 对账。
+        this.#pausedState = this.#pausedState.isPaused
+            ? { isPaused: true, callFrames: this.#pausedState.callFrames || [], stale: true }
+            : { isPaused: false, callFrames: [] };
         this.#enabled = false;
         this.#client = null;
     }
@@ -191,6 +196,16 @@ export class DebuggerContext {
         return this.#pausedState.isPaused;
     }
     /**
+     * The local paused mirror is known to be wrong (CDP already reports running).
+     * Correct it instead of leaving a stale isPaused=true that blocks every caller.
+     * Reconciliation happens where CDP actually answers: resume() and
+     * evaluate_script() both catch CDP's "Can only perform operation while paused"
+     * and call this.
+     */
+    markRunning() {
+        this.#pausedState = { isPaused: false, callFrames: [] };
+    }
+    /**
      * Get the current paused state.
      */
     getPausedState() {
@@ -204,9 +219,27 @@ export class DebuggerContext {
             throw new Error('Debugger not enabled');
         }
         if (!this.#pausedState.isPaused) {
+            // 陈旧镜像：CDP 早已恢复运行，目标状态已达成，按幂等处理而不是抛错。
+            if (this.#pausedState.stale) {
+                this.markRunning();
+                return { alreadyRunning: true };
+            }
             throw new Error('Execution is not paused');
         }
-        await this.#client.send('Debugger.resume');
+        try {
+            await this.#client.send('Debugger.resume');
+        }
+        catch (error) {
+            // CDP 明确说已经不在暂停态 → 以 CDP 为准修正本地状态，按幂等处理。
+            if (/Can only perform operation while paused|not paused/i.test(String(error?.message || ''))) {
+                this.markRunning();
+                return { alreadyRunning: true };
+            }
+            throw error;
+        }
+        // resume 是异步生效的；立刻清状态，避免下一次调用读到旧的 isPaused=true。
+        this.markRunning();
+        return { alreadyRunning: false };
     }
     /**
      * Pause execution.
