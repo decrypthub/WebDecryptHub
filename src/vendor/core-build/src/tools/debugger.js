@@ -997,6 +997,9 @@ export const getPausedInfo = defineTool({
             }
         }
         response.appendResponseLine('\n💡 Use pause_or_resume(action="resume") to resume, or step with direction="over" | "into" | "out" to continue one step.');
+        if (pausedState.stale) {
+            response.appendResponseLine('⚠️ This paused state may be stale (the CDP listener was detached and re-attached). If a resume reports "already running", the page is actually running and no pause exists.');
+        }
         response.setStructuredContent({
             paused: true,
             reason: pausedState.reason ?? null,
@@ -1033,12 +1036,31 @@ export const pauseOrResume = defineTool({
         requireDebuggerEnabled(debugger_);
         try {
             if (request.params.action === 'resume') {
+                const stale = debugger_.getPausedState()?.stale;
                 if (!debugger_.isPaused()) {
-                    throw new ToolError('CONFLICT', 'Execution is already running; action=resume is not applicable.');
+                    if (!stale) {
+                        throw new ToolError('CONFLICT', 'Execution is already running; action=resume is not applicable.');
+                    }
+                    // 陈旧镜像：以 CDP 为准，不拦这次调用。
+                    debugger_.markRunning();
+                    response.appendResponseLine('▶️ Execution was already running (the local paused state was stale and has been corrected).');
+                    response.setStructuredContent({ action: 'resume', state: 'running', reconciled: true });
+                    return;
                 }
-                await debugger_.resume();
-                response.appendResponseLine('▶️ Execution resumed.');
-                response.setStructuredContent({ action: 'resume', state: 'running' });
+                if (stale) {
+                    // 镜像说暂停，但它是 disable/enable 之后留下的旧值，CDP 侧很可能早已运行。
+                    // 先尝试真正 resume；CDP 若确认未暂停，resume() 会幂等返回并修正镜像。
+                    const healed = await debugger_.resume();
+                    debugger_.markRunning();
+                    response.appendResponseLine(healed?.alreadyRunning
+                        ? '▶️ Execution was already running; stale paused state corrected.'
+                        : '▶️ Execution resumed (recovered from a stale paused state).');
+                    response.setStructuredContent({ action: 'resume', state: 'running', reconciled: true });
+                    return;
+                }
+                const resumed = await debugger_.resume();
+                response.appendResponseLine(resumed?.alreadyRunning ? '▶️ Execution was already running; state reconciled.' : '▶️ Execution resumed.');
+                response.setStructuredContent({ action: 'resume', state: 'running', ...(resumed?.alreadyRunning ? { reconciled: true } : {}) });
             }
             else {
                 if (debugger_.isPaused()) {
