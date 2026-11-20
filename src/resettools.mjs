@@ -81,12 +81,37 @@ async function restartFresh(a, ctx) {
 }
 
 export const RESET_TOOLS = [
-  { name: 'reset_session', description: '「从头再来」：一次性清理当前站点（scope=site，默认）或所有站点（scope=all）的 Cookie（含 HttpOnly）、localStorage/IndexedDB/CacheStorage/ServiceWorker、各 frame 的 sessionStorage，可选清全局 HTTP 缓存，并清空应用与内核的已捕获请求，默认随后刷新页面重新抓包。用于：重新触发签名请求前、复现失败怀疑被旧状态/缓存密钥干扰时、A/B 对比"有/无登录态"时。安全模式下由应用向用户弹出确认，不要自行填写 confirm 代替用户。',
-    schema: { type: 'object', properties: { confirm: { type: 'boolean' }, scope: { type: 'string', enum: ['site', 'all'] }, cookies: { type: 'boolean' }, storage: { type: 'boolean' }, cache: { type: 'boolean' }, requests: { type: 'boolean' }, reload: { type: 'boolean' } }, required: ['confirm'] }, run: resetSession },
-  { name: 'restart_browser_fresh', description: '关闭浏览器并用全新的临时隔离 Profile 重启（完全干净：无 Cookie/存储/缓存/扩展状态），可指定 url 重新打开。比 reset_session 更彻底，用于怀疑设备指纹/风控标记残留，或需要"首次访问"行为时。安全模式下由应用向用户弹出确认，不要自行填写 confirm 代替用户。',
-    schema: { type: 'object', properties: { confirm: { type: 'boolean' }, url: { type: 'string' } }, required: ['confirm'] }, run: restartFresh },
-  { name: 'get_cookies', description: '只读：列出当前页面（或指定 url）的 Cookie，含 HttpOnly/Secure/过期。可用 name 过滤。用于确认签名密钥是否来自 Cookie、对比清理前后差异。',
-    schema: { type: 'object', properties: { url: { type: 'string' }, name: { type: 'string' } } }, run: getCookies },
+  { name: 'reset_session', description: '「从头再来」：一次性清理当前站点或所有站点的 Cookie/存储/缓存/已捕获请求，默认随后刷新页面重新抓包。用于重新触发签名请求前、复现失败怀疑被旧状态或缓存密钥干扰时、A/B 对比有/无登录态时。安全模式下由应用向用户弹出确认，不要自行填写 confirm 代替用户。',
+    schema: {
+      type: 'object',
+      properties: {
+        confirm: { type: 'boolean', description: '必须为 true 才执行；这一步应由用户确认，不要自己填。' },
+        scope: { type: 'string', enum: ['site', 'all'], description: '清理范围：site 只清当前页面涉及的站点（默认），all 清全部站点。' },
+        cookies: { type: 'boolean', description: '是否清 Cookie（含 HttpOnly/Secure），默认 true。' },
+        storage: { type: 'boolean', description: '是否清 localStorage/IndexedDB/CacheStorage/ServiceWorker/sessionStorage，默认 true。' },
+        cache: { type: 'boolean', description: '是否清浏览器全局 HTTP 缓存，默认 false（影响其他站点，较慢）。' },
+        requests: { type: 'boolean', description: '是否清空已捕获请求，默认 true。' },
+        reload: { type: 'boolean', description: '清理后是否刷新页面重新抓包，默认 true。' },
+      },
+      required: ['confirm'],
+    }, run: resetSession },
+  { name: 'restart_browser_fresh', description: '关闭浏览器并用全新的临时隔离 Profile 重启（完全干净：无 Cookie/存储/缓存/扩展状态）。比 reset_session 更彻底，用于怀疑设备指纹或风控标记残留、需要首次访问行为时。安全模式下由应用向用户弹出确认，不要自行填写 confirm 代替用户。',
+    schema: {
+      type: 'object',
+      properties: {
+        confirm: { type: 'boolean', description: '必须为 true 才执行；这一步应由用户确认，不要自己填。' },
+        url: { type: 'string', description: '重启后要打开的网址；省略则停在空白页。' },
+      },
+      required: ['confirm'],
+    }, run: restartFresh },
+  { name: 'get_cookies', description: '只读：列出 Cookie（含 HttpOnly/Secure/过期）。用于确认签名密钥是否来自 Cookie、对比清理前后差异。',
+    schema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string', description: '只取匹配该网址的 Cookie；省略则取当前页面。' },
+        name: { type: 'string', description: '只取该名称的 Cookie。' },
+      },
+    }, run: getCookies },
 ];
 
 // —— 本地文件检索：对 save_script_source 落盘的大脚本做搜索/切片，不占用浏览器 ——
@@ -120,15 +145,40 @@ async function grepFile(a, ctx) {
 async function readSlice(a, ctx) {
   const p = resolveInProject(ctx.projectDir, a.file);
   const text = fs.readFileSync(p, 'utf8');
-  const off = Math.max(0, a.offset | 0), len = Math.min(a.length ?? 3000, 12000);
-  return { text: `${path.basename(p)} [${off}, ${Math.min(text.length, off + len)}) / ${text.length}：\n${text.slice(off, off + len)}` };
+  const want = a.length ?? 3000;
+  const off = Math.max(0, a.offset | 0), len = Math.min(want, 12000);
+  const end = Math.min(text.length, off + len);
+  // 被截断时必须说清下一步，否则调用方只知道"没读完"却不知道该怎么办。
+  const notes = [];
+  if (want > 12000) notes.push(`单次上限 12000 字符（请求 ${want}）`);
+  if (end < text.length) notes.push(`文件共 ${text.length} 字符，用 offset=${end} 继续读`);
+  const tail = notes.length ? `\n\n[未读完] ${notes.join('；')}。` : '';
+  return { text: `${path.basename(p)} [${off}, ${end}) / ${text.length}：\n${text.slice(off, off + len)}${tail}` };
 }
 function listFiles(a, ctx) {
   const files = fs.readdirSync(ctx.projectDir, { recursive: true }).map(String).filter(f => { try { return fs.statSync(path.join(ctx.projectDir, f)).isFile(); } catch { return false; } });
   return { text: `项目目录 ${ctx.projectDir} 共 ${files.length} 个文件：\n` + files.slice(0, 200).map(f => `${f}  (${fs.statSync(path.join(ctx.projectDir, f)).size} B)`).join('\n') };
 }
 RESET_TOOLS.push(
-  { name: 'grep_file', description: '在项目目录内已落盘的文件（如 save_script_source 保存的大脚本、反混淆结果）中搜索关键字或正则，返回每处命中的 offset 与前后上下文。不占用浏览器，适合页面卡顿/超时或脚本数 MB 的情况。', schema: { type: 'object', properties: { file: { type: 'string' }, pattern: { type: 'string' }, regex: { type: 'boolean' }, context: { type: 'number' }, maxResults: { type: 'number' } }, required: ['file', 'pattern'] }, run: grepFile },
-  { name: 'read_file_slice', description: '按字符 offset/length 读取项目目录内文件的一段（最多 12000 字符），配合 grep_file 精读函数实现。', schema: { type: 'object', properties: { file: { type: 'string' }, offset: { type: 'number' }, length: { type: 'number' } }, required: ['file', 'offset'] }, run: readSlice },
-  { name: 'list_project_files', description: '列出项目目录内已保存的文件（脚本、反混淆结果、导出代码、笔记）。', schema: { type: 'object', properties: {} }, run: listFiles },
+  { name: 'grep_file', description: '在项目目录内已落盘的文件（如 save_script_source 保存的大脚本、反混淆结果）中搜索关键字或正则。不占用浏览器，适合页面卡顿/超时或脚本数 MB 的情况。', schema: {
+    type: 'object',
+    properties: {
+      file: { type: 'string', description: '相对项目目录的文件路径。' },
+      pattern: { type: 'string', description: '要搜索的关键字；regex 为 true 时按正则解释。' },
+      regex: { type: 'boolean', description: 'true 把 pattern 当正则，默认 false 按字面量匹配。' },
+      context: { type: 'number', description: '每处命中前后各取多少字符，默认 120，上限 400。调大容易撑爆返回。' },
+      maxResults: { type: 'number', description: '最多返回几处命中，默认 10，上限 50。' },
+    },
+    required: ['file', 'pattern'],
+  }, run: grepFile },
+  { name: 'read_file_slice', description: '按字符偏移读取项目目录内文件的一段，配合 grep_file 拿到的 offset 精读函数实现。', schema: {
+    type: 'object',
+    properties: {
+      file: { type: 'string', description: '相对项目目录的文件路径。' },
+      offset: { type: 'number', description: '起始字符偏移，通常来自 grep_file 返回的 offset。' },
+      length: { type: 'number', description: '读取长度，默认 3000，上限 12000；要更多就调大 offset 分次读。' },
+    },
+    required: ['file', 'offset'],
+  }, run: readSlice },
+  { name: 'list_project_files', description: '列出项目目录内已保存的文件（脚本、反混淆结果、导出代码、笔记），含体积。不确定文件叫什么名字时先用这个。', schema: { type: 'object', properties: {} }, run: listFiles },
 );

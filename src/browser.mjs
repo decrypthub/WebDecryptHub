@@ -57,6 +57,7 @@ class BrowserManager extends EventEmitter {
     this.cdpPort = null; this.cdp = null; this.screencastPage = null;
     this.projectDir = null; this.lastFrameMeta = null;
     this.net = new NetCapture(this); this.imported = []; this._dirty = new Map(); this._flushT = null;
+    this.consoleEntries = []; this.consoleSeq = 0; this.consoleSessions = new WeakMap();
     this.injector = new Injector(this);
     this.injector.on('log', m => this.emit('log', m));
   }
@@ -132,6 +133,7 @@ class BrowserManager extends EventEmitter {
     for (const p of this.context.pages()) this._addPage(p);
     if (!this.pages.length) await this.context.newPage();
     await Promise.all(this.pages.map(p => this.captureReady?.get(p)));
+    await Promise.all(this.pages.map(p => this.consoleReady?.get(p)));
     if (!headless && this.fit) await this._fitHeadedWindow(this.pages[0]);
     this.injector.resetContext();
     await this.injector.armAll().catch(e => this.emit('log', 'inject armAll: ' + e.message));
@@ -158,8 +160,86 @@ class BrowserManager extends EventEmitter {
     page.on('framenavigated', f => { if (f === page.mainFrame()) this.emit('status', this.status()); });
     this.captureReady ||= new WeakMap();
     this.captureReady.set(page, this.net.attach(page, this.context).catch(e => this.emit('log', '抓包初始化失败：' + e.message)));
+    this.consoleReady ||= new WeakMap();
+    this.consoleReady.set(page, this._watchConsole(page));
     // General browsing does not automatically copy every website script to disk.
     this.setActive(page);
+  }
+
+  // Patchright 不向 page.on('console') 派发事件，控制台只能走原始 CDP 的 Runtime/Log 域。
+  async _watchConsole(page) {
+    if (this.consoleSessions.has(page)) return;
+    let session;
+    try { session = await page.context().newCDPSession(page); }
+    catch (error) { this.emit('log', '控制台抓取初始化失败：' + error.message); return; }
+    this.consoleSessions.set(page, session);
+    const pageUrl = () => { try { return page.url(); } catch { return ''; } };
+    const push = (entry) => {
+      const row = { id: ++this.consoleSeq, ts: Date.now(), page: pageUrl(), ...entry };
+      this.consoleEntries.push(row);
+      if (this.consoleEntries.length > 1000) this.consoleEntries.splice(0, 200);
+      this.emit('console', row);
+    };
+    const fmt = (arg) => {
+      if (!arg) return '';
+      if (arg.value !== undefined) return typeof arg.value === 'string' ? arg.value : JSON.stringify(arg.value);
+      return arg.preview?.description || arg.description || arg.type || '';
+    };
+    try {
+      session.on('Runtime.consoleAPICalled', (event) => push({
+        type: event.type || 'log',
+        text: (event.args || []).map(fmt).join(' '),
+        url: event.stackTrace?.callFrames?.[0]?.url,
+        line: event.stackTrace?.callFrames?.[0]?.lineNumber,
+      }));
+      session.on('Runtime.exceptionThrown', (event) => push({
+        type: 'error',
+        text: event.exceptionDetails?.exception?.description || event.exceptionDetails?.text || '未捕获异常',
+        url: event.exceptionDetails?.url,
+        line: event.exceptionDetails?.lineNumber,
+      }));
+      session.on('Log.entryAdded', (event) => push({
+        type: event.entry?.level || 'log',
+        text: event.entry?.text || '',
+        url: event.entry?.url,
+        line: event.entry?.lineNumber,
+      }));
+      await session.send('Runtime.enable');
+      await session.send('Log.enable');
+    } catch (error) {
+      this.emit('log', '控制台抓取启用失败：' + error.message);
+    }
+    page.on('close', () => { session.detach().catch(() => {}); });
+  }
+
+  consoleMessages({ msgid, types, pageSize = 20, pageIdx = 0 } = {}) {
+    if (msgid !== undefined && msgid !== null) {
+      const row = this.consoleEntries.find(e => e.id === Number(msgid));
+      if (!row) throw new Error(`控制台消息 #${msgid} 不存在（仅保留最近 1000 条）`);
+      return { message: row };
+    }
+    let rows = this.consoleEntries;
+    if (Array.isArray(types) && types.length) rows = rows.filter(e => types.includes(e.type));
+    const size = Math.min(Math.max(Number(pageSize) || 20, 1), 200);
+    const idx = Math.max(Number(pageIdx) || 0, 0);
+    const newestFirst = rows.slice().reverse();
+    return { total: rows.length, pageSize: size, pageIdx: idx, messages: newestFirst.slice(idx * size, idx * size + size) };
+  }
+
+  // 页面现状与挑战页识别：模型入口拿不到会话状态时，先看这里再决定继续等还是人工接管。
+  async state() {
+    const page = this.activePage;
+    if (!page || page.isClosed()) {
+      return { running: this.running, pages: this.pages.length, url: null, title: '', challenge: null };
+    }
+    const title = await page.title().catch(() => '');
+    const text = await Promise.race([
+      page.evaluate(() => (document.body?.innerText || '').slice(0, 800)),
+      new Promise((resolve) => setTimeout(() => resolve(''), 1500)),
+    ]).catch(() => '');
+    const hay = `${title}\n${text}`.toLowerCase();
+    const challenge = /just a moment|checking if the site connection is secure|正在进行安全验证|请稍候|verify you are human|确认您是真人|attention required|ray id [0-9a-f]{8}/.test(hay) ? 'cloudflare' : null;
+    return { running: this.running, pages: this.pages.length, url: page.url(), title, challenge };
   }
 
   async setActive(page) {

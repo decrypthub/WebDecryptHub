@@ -95,12 +95,28 @@ function check(value, schema, path) {
 /**
  * 校验并规范化一次工具调用参数。
  * - 已声明的字段按 schema 校验（类型不符会先做安全强转，例如 "5" → 5）
- * - 未声明的字段默认原样保留（不改变现有工具的宽松语义）；tool.strict=true 时剔除
- * - 返回 { ok, value, dropped } 或 { ok:false, error }
+ * - 未声明的字段：strict=true 时**报错**并列出可接受的参数名（不是静默丢弃）。
+ *   静默丢弃会让调用方以为参数生效了、实际没生效，进而得出「这个工具没这功能」的错误结论。
+ *   参见 vendor core-build 的 describeUnknownKeys，两处口径保持一致。
+ * - 返回 { ok, value } 或 { ok:false, error }
  */
 export function validateArgs(schema, args, { strict = false } = {}) {
   const input = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
   if (!schema || schema.type !== 'object') return { ok: true, value: input, dropped: [] };
+  const accepted = Object.keys(schema.properties || {});
+  if (strict && accepted.length) {
+    const unknown = Object.keys(input).filter((k) => !accepted.includes(k));
+    if (unknown.length) {
+      return {
+        ok: false,
+        error:
+          `未知参数 ${unknown.map((k) => `"${k}"`).join('、')}。` +
+          `本工具接受的参数：${accepted.map((k) => `"${k}"`).join('、')}` +
+          (schema.required?.length ? `；必填：${schema.required.map((k) => `"${k}"`).join('、')}` : '') +
+          '。',
+      };
+    }
+  }
   const value = {};
   const dropped = [];
   for (const [k, v] of Object.entries(input)) {

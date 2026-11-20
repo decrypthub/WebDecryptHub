@@ -99,7 +99,7 @@ async function runCancellableEvaluation(signal, debugger_, operation) {
 }
 export const evaluateScript = defineTool({
     name: 'evaluate_script',
-    description: "Evaluates one focused JavaScript function for DOM/page state, web storage, page-defined globals, a paused-frame expression, or browser-side processing of one local file. Use it when those runtime values are the goal and no narrower evidence tool applies. Do not use document.cookie or page evaluation to investigate HttpOnly/Secure cookies, Set-Cookie provenance, or captured HTTP evidence; use list_network_requests with cookieName/reqid, and use search_in_sources/get_script_source for source discovery. While running, evaluation uses the selected frame's isolated world by default or its page main world with mainWorld=true; while paused, it always uses the chosen call frame and ignores mainWorld. Call get_paused_info before paused evaluation, then step or resume when finished. Arbitrary code can change page/external state and requires confirm=true; inline results are bounded, so use outputFile for exact large or binary results.",
+    description: "Evaluates one focused JavaScript function for DOM/page state, web storage, page-defined globals, a paused-frame expression, or browser-side processing of one local file. Use it when those runtime values are the goal and no narrower evidence tool applies. Do not use document.cookie or page evaluation to investigate HttpOnly/Secure cookies, Set-Cookie provenance, or captured HTTP evidence; use list_network_requests with cookieName/reqid, and use search_in_sources/get_script_source for source discovery. While running, evaluation uses the selected frame's isolated world by default or its page main world with mainWorld=true; while paused, it always uses the chosen call frame and ignores mainWorld. Call get_paused_info before paused evaluation, then step or resume when finished. Arbitrary code can change page/external state and requires confirm=true; inline results are bounded, so use outputFile for exact large or binary results. Paused evaluation is synchronous: the page's JavaScript thread is stopped, so any work needing that thread to advance (fetch/XHR, timers, crypto.subtle on a suspended task, an unresolved Promise) cannot settle and the call fails. While paused, read values that already exist and stash handles on window, then resume and await them from a running-page call.",
     annotations: {
         title: 'Evaluate Script',
         category: ToolCategory.DEBUGGING,
@@ -147,12 +147,25 @@ export const evaluateScript = defineTool({
             .string()
             .optional()
             .describe('Absolute path to one host file passed as localFile; the browser never reads the path directly. Running-page input is limited to 10 MiB, while paused call-frame input remains limited to 512 KiB. Relative paths, file:// URLs, globs, ~, and directories are rejected, access is subject to --allowedRoots, and file contents may expose sensitive host data.'),
+        // Local change: exporting a large structure (a VM's bytecode array, a captured
+        // table) otherwise needs one round trip per 8 KiB chunk. Callers that know the
+        // payload size can raise this instead of paging, and the default stays 8 KiB so
+        // an ordinary evaluation is unchanged.
+        maxInlineChars: zod
+            .number()
+            .int()
+            .min(1024)
+            .max(524288)
+            .optional()
+            .describe('Raise the inline result budget (default 8192, max 524288 chars) when this call intentionally returns a large JSON value such as a dumped table or bytecode array. Prefer this over paging the same value across many calls; outputFile remains the exact path for binary or very large results.'),
     },
     handler: async (request, response, context) => {
         if (!request.params.confirm) {
             throw new ToolError('CONFIRMATION_REQUIRED', 'evaluate_script requires confirm=true because the supplied function can cause page and external side effects.');
         }
-        const { function: fnString, mainWorld, frameIndex, outputFile, localFilePath, } = request.params;
+        const { function: fnString, mainWorld, frameIndex, outputFile, localFilePath, maxInlineChars, } = request.params;
+        // Local change: per-call inline budget, defaulting to the historical 8192.
+        const inlineResultLimit = maxInlineChars ?? INLINE_EVAL_RESULT_LIMIT;
         const localFile = localFilePath
             ? await loadLocalFile(localFilePath, request.signal)
             : undefined;
@@ -256,13 +269,13 @@ export const evaluateScript = defineTool({
             }
             else {
                 const data = parsed.data ?? 'undefined';
-                const truncated = data.length > INLINE_EVAL_RESULT_LIMIT;
+                const truncated = data.length > inlineResultLimit;
                 if (truncated) {
-                    response.appendResponseLine(`Result is ${data.length} chars; inline output is truncated to ${INLINE_EVAL_RESULT_LIMIT} chars. Re-run with outputFile to save the exact result.`);
+                    response.appendResponseLine(`Result is ${data.length} chars; inline output is truncated to ${inlineResultLimit} chars. Re-run with outputFile to save the exact result, or raise maxInlineChars.`);
                 }
                 response.appendResponseLine('```json');
                 response.appendResponseLine(truncated
-                    ? `${data.slice(0, INLINE_EVAL_RESULT_LIMIT)}... <truncated ${data.length - INLINE_EVAL_RESULT_LIMIT} chars>`
+                    ? `${data.slice(0, inlineResultLimit)}... <truncated ${data.length - inlineResultLimit} chars>`
                     : data);
                 response.appendResponseLine('```');
                 let value = data;
@@ -275,7 +288,7 @@ export const evaluateScript = defineTool({
                 response.setStructuredContent({
                     resultType: 'json',
                     value: truncated
-                        ? `${data.slice(0, INLINE_EVAL_RESULT_LIMIT)}...`
+                        ? `${data.slice(0, inlineResultLimit)}...`
                         : value,
                     truncated,
                     charLength: data.length,

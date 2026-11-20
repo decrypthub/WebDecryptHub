@@ -274,13 +274,39 @@ export const getScriptSource = defineTool({
                     const lineOffset = lines
                         .slice(0, start)
                         .reduce((sum, l) => sum + l.length + 1, 0);
-                    response.appendResponseLine(`Selected lines ${start + 1}-${Math.min(end, lines.length)} of script ${scriptId} are too large (${content.length} chars). This file is likely minified.`);
-                    response.appendResponseLine(`Recommended: use save_script_source to download the full file — it auto-formats minified code so you can read it normally afterwards.`);
-                    response.appendResponseLine(`Or use offset/length params for a partial read. The character offset for line ${start + 1} is ${lineOffset}.`);
-                    response.appendResponseLine(`First 1000 characters:\n`);
+                    // Local change: same treatment as the full-source branch — say
+                    // TRUNCATED up front, and return structured next-action fields so
+                    // the caller is not left with a prose paragraph and no data.
+                    const scriptUrl = url ?? undefined;
+                    response.appendResponseLine(`[TRUNCATED] Lines ${start + 1}-${Math.min(end, lines.length)} of script ${scriptId} are ${content.length} chars (this file is likely minified); only the first 1000 are shown.`);
+                    response.appendResponseLine(`Next step: call save_script_source with { url: ${JSON.stringify(scriptUrl ?? '<from list_scripts>')} } to read the whole file (it auto-formats minified code).`);
+                    response.appendResponseLine(`For a bounded inline read instead, call get_script_source with offset=${lineOffset}, length=4000.`);
+                    response.appendResponseLine(`The block below is a PREVIEW, not the requested range:\n`);
                     response.appendResponseLine('```javascript');
                     response.appendResponseLine(content.substring(0, 1000) + '...');
                     response.appendResponseLine('```');
+                    response.setStructuredContent({
+                        scriptId,
+                        sourceType: 'javascript',
+                        startLine: start + 1,
+                        endLine: Math.min(end, lines.length),
+                        totalLines: lines.length,
+                        totalChars: source.length,
+                        requestedChars: content.length,
+                        returnedChars: 1000,
+                        source: `${content.substring(0, 1000)}...`,
+                        truncated: true,
+                        nextAction: {
+                            tool: 'save_script_source',
+                            arguments: scriptUrl ? { url: scriptUrl } : { scriptId },
+                            reason: 'The requested line range exceeds the 1000-char inline limit.',
+                        },
+                        alternativeAction: {
+                            tool: 'get_script_source',
+                            arguments: { scriptId, offset: lineOffset, length: 4000 },
+                            reason: `Character offset of line ${start + 1} is ${lineOffset}.`,
+                        },
+                    });
                     return;
                 }
                 response.appendResponseLine(`Source for script ${scriptId} (lines ${start + 1}-${Math.min(end, lines.length)}):\n`);
@@ -301,11 +327,40 @@ export const getScriptSource = defineTool({
             }
             // Full source - but warn if it's too large
             if (source.length > 1000) {
-                response.appendResponseLine(`Script ${scriptId} is large (${source.length} chars). To view the whole file, use save_script_source (auto-formats minified code). To read a portion inline, use offset/length or startLine/endLine.`);
-                response.appendResponseLine(`First 1000 characters:\n`);
+                // Local change: make the truncation impossible to skim past.
+                // The old form buried "use save_script_source" inside a prose
+                // sentence and still returned a 1000-char head that looks like a
+                // real answer. Callers read the head, concluded they had the file,
+                // and worked from a prefix. Now the actionable fields are
+                // structured, and the head is explicitly labelled as a preview.
+                const scriptUrl = url ?? undefined;
+                response.appendResponseLine(`[TRUNCATED] Script ${scriptId} is ${source.length} chars; only the first 1000 are shown below.`);
+                response.appendResponseLine(`Next step: call save_script_source with { url: ${JSON.stringify(scriptUrl ?? '<from list_scripts>')} } and read the returned file.`);
+                response.appendResponseLine(`For a small known region instead, re-call get_script_source with offset/length or startLine/endLine.`);
+                response.appendResponseLine(`The block below is a PREVIEW, not the complete source:\n`);
                 response.appendResponseLine('```javascript');
                 response.appendResponseLine(source.substring(0, 1000) + '...');
                 response.appendResponseLine('```');
+                response.setStructuredContent({
+                    scriptId,
+                    sourceType: 'javascript',
+                    totalChars: source.length,
+                    returnedChars: 1000,
+                    source: `${source.substring(0, 1000)}...`,
+                    truncated: true,
+                    // Structured so a caller can branch on it without parsing prose.
+                    nextAction: {
+                        tool: 'save_script_source',
+                        arguments: scriptUrl ? { url: scriptUrl } : { scriptId },
+                        reason: 'Source exceeds the 1000-char inline limit; save it to a file to read the whole script.',
+                    },
+                    alternativeAction: {
+                        tool: 'get_script_source',
+                        arguments: { scriptId, offset: 0, length: 4000 },
+                        reason: 'Read a bounded region inline when only one part is needed.',
+                    },
+                });
+                return;
             }
             else {
                 response.appendResponseLine(`Source for script ${scriptId}:\n`);
@@ -457,6 +512,12 @@ export const searchInSources = defineTool({
             kind: zod.enum(['external', 'inline_or_eval']),
             lineNumber: zod.number().int(),
             lineContent: zod.string(),
+            // Local change: names the selector that survives reload/navigation so a
+            // programmatic caller does not have to infer it from `kind`.
+            stableSelector: zod.object({
+                url: zod.string().optional(),
+                scriptId: zod.string().optional(),
+            }).optional(),
         }))
             .optional(),
     }),
@@ -581,7 +642,18 @@ export const searchInSources = defineTool({
                         preview = preview.substring(0, effectiveMaxLen) + '...';
                     }
                 }
-                response.appendResponseLine(`[${scriptId}] ${url}:${lineNum}`);
+                // Local change: lead with the selector that survives navigation.
+                // This used to print `[18] url:2`, putting the expiring scriptId
+                // first and the stable URL second. Callers copied the bracketed
+                // number (it looks like the primary key) and then hit "invalid
+                // scriptId" after a reload. The stable selector now comes first and
+                // the volatile one is explicitly labelled.
+                if (match.url) {
+                    response.appendResponseLine(`${match.url}:${lineNum}   (scriptId ${scriptId}, expires on reload)`);
+                }
+                else {
+                    response.appendResponseLine(`<inline/eval script> line ${lineNum}   (scriptId ${scriptId}, no URL — use scriptId)`);
+                }
                 response.appendResponseLine(`  ${preview}`);
                 response.appendResponseLine('');
                 structuredMatches.push({
@@ -590,10 +662,13 @@ export const searchInSources = defineTool({
                     kind: match.url ? 'external' : 'inline_or_eval',
                     lineNumber: lineNum,
                     lineContent: preview,
+                    // Local change: name the durable selector explicitly so a
+                    // programmatic caller does not have to infer it from `kind`.
+                    stableSelector: match.url ? { url: match.url } : { scriptId },
                 });
             }
             response.appendResponseLine('---');
-            response.appendResponseLine('Tip: Use get_script_source(url=..., startLine, endLine) to view full context around a match. Using url is preferred over scriptId as it stays valid across page navigations.');
+            response.appendResponseLine('Tip: call get_script_source with `url` (not `scriptId`) for external scripts — url survives reload and navigation, scriptId does not.');
             response.setStructuredContent({
                 query,
                 totalMatches,
@@ -883,7 +958,7 @@ export const getRequestInitiator = defineTool({
  */
 export const getPausedInfo = defineTool({
     name: 'get_paused_info',
-    description: 'Inspects the current call stack, source locations, and selected call-frame scopes after a code/XHR breakpoint or explicit pause has stopped execution. It neither creates a pause nor resumes one. Returned frameIndex values and callFrameIds belong only to the current pause and expire after any step or resume; use evaluate_script with frameIndex for a focused expression, then step or pause_or_resume(action="resume").',
+    description: 'Inspects the current call stack, source locations, and selected call-frame scopes after a code/XHR breakpoint or explicit pause has stopped execution. It neither creates a pause nor resumes one. Returned frameIndex values and callFrameIds belong only to the current pause and expire after any step or resume; use evaluate_script with frameIndex for a focused expression, then step or pause_or_resume(action="resume"). To recover a transform whose algorithm is not readable, prefer a before/after diff of the same buffer over reading the code: copy the input, let the routine run, then XOR or subtract the two byte sequences from evaluate_script. A repeating residue is the keystream, and a constant residue across inputs is the key material.',
     annotations: {
         title: 'Get Paused Info',
         category: ToolCategory.REVERSE_ENGINEERING,
@@ -1195,6 +1270,12 @@ export const setBreakpointOnText = defineTool({
             if (!url) {
                 throw new ToolError('PRECONDITION_FAILED', 'Cannot set breakpoint: script has no URL (inline script).');
             }
+            // Local change: searchInContent returns script-relative lines. For an inline
+            // script Chrome reports the document URL but setBreakpointByUrl expects a
+            // document-relative line, so add the script's startLine; external scripts
+            // normally have startLine 0 and are unaffected.
+            const scriptStartLine = Number(script?.startLine) || 0;
+            const breakpointLine = scriptStartLine + match.lineNumber;
             // Step 2: Get exact column position by searching in the script source
             const result = await debugger_.getScriptSource(match.scriptId);
             const source = result.scriptSource;
@@ -1209,11 +1290,11 @@ export const setBreakpointOnText = defineTool({
                 }
             }
             // Step 3: Set the breakpoint
-            const breakpointInfo = await debugger_.setBreakpoint(url, match.lineNumber, columnNumber, condition);
+            const breakpointInfo = await debugger_.setBreakpoint(url, breakpointLine, columnNumber, condition);
             response.appendResponseLine(`✅ Breakpoint set successfully!`);
             response.appendResponseLine(`- ID: ${breakpointInfo.breakpointId}`);
             response.appendResponseLine(`- URL: ${url}`);
-            response.appendResponseLine(`- Line: ${match.lineNumber + 1}, Column: ${columnNumber}`);
+            response.appendResponseLine(`- Line: ${breakpointLine + 1}, Column: ${columnNumber}`);
             if (condition) {
                 response.appendResponseLine(`- Condition: ${condition}`);
             }

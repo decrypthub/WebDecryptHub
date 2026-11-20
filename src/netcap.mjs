@@ -11,18 +11,24 @@ const SKIP_BODY = new Set(['media', 'websocket', 'eventsource']);
 const MAX_RECORDS = 4000;
 
 export class NetCapture {
+  #initiators = new WeakMap();
+
   constructor(browser) {
     this.b = browser; this.paused = false; this.bytes = 0; this.dir = null;
-    this.extraReq = new Map(); this.extraRes = new Map();
   }
   setDir(projectDir) {
     this.dir = path.join(projectDir, '.capture', String(Date.now()));
     fs.mkdirSync(this.dir, { recursive: true }); this.bytes = 0;
   }
+  getInitiator(record) {
+    return this.#initiators.get(record) ?? null;
+  }
   async attach(page, context) {
     let cdp;
     try { cdp = await context.newCDPSession(page); } catch { return; }
     const live = new Map(); // requestId -> record
+    const extraReq = new Map();
+    const extraRes = new Map();
     const b = this.b;
     const tsBase = { mono: null, wall: null };
     cdp.on('Network.requestWillBeSent', e => {
@@ -36,7 +42,9 @@ export class NetCapture {
         status: 'pending', statusText: '', time: Math.round((e.wallTime || Date.now() / 1000) * 1000), t0: e.timestamp,
         initiator: summarizeInitiator(e.initiator), pageUrl: e.documentURL, sig: [],
       };
-      const ex = this.extraReq.get(e.requestId); if (ex) { Object.assign(r.headers, ex); this.extraReq.delete(e.requestId); }
+      // Redirects share a CDP requestId. Keep the stack on the exact captured hop.
+      if (e.initiator) this.#initiators.set(r, e.initiator);
+      const ex = extraReq.get(e.requestId); if (ex) { Object.assign(r.headers, ex); extraReq.delete(e.requestId); }
       live.set(e.requestId, r);
       b._push(r);
       if (r.hasPostData && r.postData == null) cdp.send('Network.getRequestPostData', { requestId: e.requestId }).then(x => { r.postData = x.postData; r.sig = detectSig(r); b._changed(r); }).catch(() => {});
@@ -46,13 +54,13 @@ export class NetCapture {
     cdp.on('Network.requestWillBeSentExtraInfo', e => {
       if (this.paused) return;
       const r = live.get(e.requestId); const h = flatHeaders(e.headers);
-      if (r) { Object.assign(r.headers, h); r.sig = detectSig(r); b._changed(r); } else this.extraReq.set(e.requestId, h);
+      if (r) { Object.assign(r.headers, h); r.sig = detectSig(r); b._changed(r); } else extraReq.set(e.requestId, h);
     });
-    cdp.on('Network.responseReceived', e => { const r = live.get(e.requestId); if (!r) return; this._applyResponse(r, e.response); const ex = this.extraRes.get(e.requestId); if (ex) { r.respHeaders = { ...r.respHeaders, ...ex }; this.extraRes.delete(e.requestId); } b._changed(r); });
+    cdp.on('Network.responseReceived', e => { const r = live.get(e.requestId); if (!r) return; this._applyResponse(r, e.response); const ex = extraRes.get(e.requestId); if (ex) { r.respHeaders = { ...r.respHeaders, ...ex }; extraRes.delete(e.requestId); } b._changed(r); });
     cdp.on('Network.responseReceivedExtraInfo', e => {
       if (this.paused) return;
       const r = live.get(e.requestId); const h = flatHeaders(e.headers);
-      if (r && r.respHeaders) { r.respHeaders = { ...r.respHeaders, ...h }; if (e.statusCode) r.status = e.statusCode; b._changed(r); } else this.extraRes.set(e.requestId, h);
+      if (r && r.respHeaders) { r.respHeaders = { ...r.respHeaders, ...h }; if (e.statusCode) r.status = e.statusCode; b._changed(r); } else extraRes.set(e.requestId, h);
       if (r && e.headersText) r.respHeadersText = e.headersText.slice(0, 20000);
     });
     cdp.on('Network.loadingFinished', async e => {

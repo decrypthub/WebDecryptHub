@@ -25,7 +25,7 @@ import * as pagesTools from './tools/pages.js';
 import * as screenshotTools from './tools/screenshot.js';
 import * as scriptTools from './tools/script.js';
 import * as siteDataTools from './tools/siteData.js';
-import { TOOL_OUTPUT_SCHEMA, } from './tools/ToolDefinition.js';
+import { TOOL_OUTPUT_SCHEMA, acceptedParameterNames, describeUnknownKeys, } from './tools/ToolDefinition.js';
 import * as websocketTools from './tools/websocket.js';
 // Read the version from package.json at runtime so it never drifts from the
 // published package. Releases here are driven by `npm version` + a git tag, not
@@ -122,11 +122,24 @@ function errorResult(toolName, error) {
         isError: true,
     };
 }
+// Local change: attach typo suggestions to the strict object itself so the MCP
+// SDK can still expose the object's properties in tools/list.
+function withActionableErrors(schema) {
+    const accepted = acceptedParameterNames(schema);
+    if (!accepted.length)
+        return schema;
+    const definition = schema.def;
+    return schema.clone({
+        ...definition,
+        error: issue => describeUnknownKeys(issue, accepted) ?? definition.error?.(issue),
+    }, { parent: true });
+}
+
 function registerTool(tool) {
     const { category, ...annotations } = tool.annotations;
     server.registerTool(tool.name, {
         description: tool.description,
-        inputSchema: tool.schema,
+        inputSchema: withActionableErrors(tool.schema),
         outputSchema: tool.outputSchema ?? TOOL_OUTPUT_SCHEMA,
         annotations,
         _meta: { 'io.github.zhizhuodemao/category': category },

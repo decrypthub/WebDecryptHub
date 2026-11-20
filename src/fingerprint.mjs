@@ -135,5 +135,11 @@ async function fpReport(a, ctx) {
 
 export const FINGERPRINT_TOOLS = [
   { name: 'fingerprint_install', description: '安装指纹采集点追踪：Hook Canvas/WebGL/WebRTC/Audio/Navigator/Screen/Crypto/字体/时区，记录调用栈与返回值。用于识别站点读了哪些指纹、为 Node 补环境列清单。', schema: { type: 'object', properties: {} }, run: fpInstall },
-  { name: 'fingerprint_report', description: '按类别汇总指纹采集命中，导出 JSON，并生成 env-patch-skeleton.js 补环境骨架。', schema: { type: 'object', properties: { file: { type: 'string' }, save: { type: 'boolean' } } }, run: fpReport },
+  { name: 'fingerprint_report', description: '按类别汇总指纹采集命中，导出 JSON，并生成 env-patch-skeleton.js 补环境骨架。', schema: {
+    type: 'object',
+    properties: {
+      file: { type: 'string', description: '报告的相对文件名，省略时使用默认名称。' },
+      save: { type: 'boolean', description: '设为 true 将报告写入项目目录，默认只返回摘要。' },
+    },
+  }, run: fpReport },
 ];

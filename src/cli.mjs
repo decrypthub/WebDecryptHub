@@ -5,7 +5,8 @@ import os from 'node:os';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { WebRuntime, API_VERSION, VERSION } from './service.mjs';
+import { WebRuntime, API_VERSION, VERSION, describeTools } from './service.mjs';
+import { listDebuggerTools } from './mcp.mjs';
 import { ensurePatchrightResources } from './runtime.mjs';
 import * as kernels from './kernels.mjs';
 import * as chrome from './chrome.mjs';
@@ -25,7 +26,7 @@ const dataDir = path.resolve(
   ),
 );
 const kernelDir = path.resolve(value('kernel-dir', dataDir));
-fs.mkdirSync(dataDir, { recursive: true });
+if (command !== 'tools') fs.mkdirSync(dataDir, { recursive: true });
 if (command === '--version' || command === 'version') {
   console.log('WebDecryptHub ' + VERSION);
 } else if (command === 'kernel' && argv[1] === 'install') {
@@ -44,6 +45,20 @@ if (command === '--version' || command === 'version') {
           (p) => console.error(JSON.stringify(p)),
         );
   console.log(JSON.stringify(result, null, 2));
+} else if (command === 'status') {
+  const system = chrome.findChrome(null);
+  const cloak = kernels.installedKernel(kernelDir, 'cloak');
+  console.log(JSON.stringify({
+    schemaVersion: 1, component: 'wdh', version: VERSION, checkedAt: new Date().toISOString(),
+    connections: [], targets: [],
+    browser: { available: value('browser', 'cloak') === 'cloak' ? cloak !== null : !!system?.length,
+      state: 'not-observed', system, cloak },
+  }, null, 2));
+} else if (command === 'tools') {
+  const group = value('group', '');
+  if (group && !['browser', 'debugger'].includes(group)) throw Error('Unknown tool group');
+  const debuggerTools = group === 'debugger' ? await listDebuggerTools() : [];
+  console.log(JSON.stringify({ tools: describeTools(debuggerTools) }, null, 2));
 } else if (command === 'doctor') {
   console.log(
     JSON.stringify(
@@ -101,6 +116,7 @@ if (command === '--version' || command === 'version') {
       );
       if (request.params.name === 'discover_tools')
         await server.notification({ method: 'notifications/tools/list_changed' });
+      if (Array.isArray(result?.content)) return result;
       return {
         content: [
           {
@@ -137,5 +153,5 @@ if (command === '--version' || command === 'version') {
   watch.unref();
 } else
   console.log(
-    'WebDecryptHub\n  wdh mcp [--root folder] [--browser cloak|system] [--headless]\n  wdh kernel install cloak|bundled [--tag version]\n  wdh doctor\nBrowser binaries are downloaded separately from their official source.',
+    'WebDecryptHub\n  wdh mcp [--root folder] [--browser cloak|system] [--headless]\n  wdh status --json [--browser system|cloak]\n  wdh tools --json [--group debugger]\n  wdh kernel install cloak|bundled [--tag version]\n  wdh doctor\nBrowser binaries are downloaded separately from their official source.',
   );
